@@ -204,6 +204,8 @@ const db = await HiveDB.open("./data", {
 
 Documentos y consultas deben producirse con el mismo modelo y configuración representados por `spaceId`. HiveDB rechaza dimensiones distintas, NaN, infinitos y vectores de norma cero.
 
+**Actualizar desde 0.3.x.** Una base creada con 0.3.x abre sin cambios en tu código: su `meta.json` se migra solo y colecciones y event-log quedan intactos. Lo que no sobrevive es el índice semántico —0.3.x no guardaba los documentos en ningún lugar del que se puedan recuperar—, así que después de actualizar vuelve a indexar tus documentos con `upsertBatch`. Si necesitas volver a 0.3.x, la base migrada sigue abriéndose con esa versión.
+
 ### Consultar
 
 ```ts

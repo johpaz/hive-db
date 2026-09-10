@@ -185,3 +185,111 @@ fn authoritative_documents_rebuild_both_indexes_on_reopen() {
         "doc"
     );
 }
+
+/// Copia a un directorio temporal el fixture de una base creada con 0.3.1
+/// (sólo lo que toca el índice semántico: `meta.json`, `vec/` y el Tantivy de
+/// esa versión), porque abrirla la migra.
+fn legacy_database() -> tempfile::TempDir {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    copy(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v0.3.1"),
+        dir.path(),
+    );
+    dir
+}
+
+fn meta(dir: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn opens_a_database_created_by_0_3_without_losing_the_way_back() {
+    let dir = legacy_database();
+    let index = SemanticIndex::open(dir.path(), None).unwrap();
+
+    let migrated = meta(dir.path());
+    assert_eq!(migrated["schema_version"], 2);
+    assert!(migrated["vector"].is_null());
+    // 0.3.x sólo lee esta clave: conservarla es lo que permite volver atrás.
+    assert_eq!(migrated["vector_dimension"], 384);
+
+    // 0.3.x no guardaba los documentos en ningún almacén autoritativo, así que
+    // el índice arranca vacío y el consumidor reindexa.
+    assert!(
+        index
+            .query_hybrid(HybridQuery::default().with_text("buscar web").with_k(5))
+            .unwrap()
+            .is_empty()
+    );
+    index
+        .upsert(&IndexDoc::new("tool:web_search").with_body("buscar en la web"))
+        .unwrap();
+    drop(index);
+
+    let reopened = SemanticIndex::open(dir.path(), None).unwrap();
+    assert_eq!(
+        reopened
+            .query_hybrid(HybridQuery::default().with_text("buscar").with_k(1))
+            .unwrap()[0]
+            .id,
+        "tool:web_search"
+    );
+    assert_eq!(meta(dir.path())["vector_dimension"], 384);
+}
+
+#[test]
+fn a_database_created_by_0_3_can_adopt_an_explicit_vector_space() {
+    let dir = legacy_database();
+    let index = SemanticIndex::open(dir.path(), config(8)).unwrap();
+    index
+        .upsert(&IndexDoc::new("doc").with_vector(unit(8, 0)))
+        .unwrap();
+    drop(index);
+
+    assert_eq!(meta(dir.path())["vector"]["dimension"], 8);
+    // A partir de aquí rige la identidad del espacio como en cualquier base v2.
+    let error = match SemanticIndex::open(dir.path(), None) {
+        Ok(_) => panic!("reopening in text-only mode must fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().starts_with("VECTOR_SPACE_MISMATCH:"));
+}
+
+#[test]
+fn a_current_meta_is_accepted_as_is_and_never_rewritten() {
+    // Byte a byte lo que escriben 0.4.x y 0.5.0 —lo que tienen hoy las bases de
+    // hive-sdk/hive-cloud—: abrirlas no puede tocar el archivo.
+    let dir = tempfile::tempdir().unwrap();
+    let written_by_0_4: &[u8] =
+        b"{\n  \"schema_version\": 2,\n  \"metric\": \"cosine\",\n  \"vector\": null\n}";
+    std::fs::write(dir.path().join("meta.json"), written_by_0_4).unwrap();
+
+    drop(SemanticIndex::open(dir.path(), None).unwrap());
+    assert_eq!(
+        std::fs::read(dir.path().join("meta.json")).unwrap(),
+        written_by_0_4
+    );
+}
+
+#[test]
+fn an_unreadable_meta_is_reported_as_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("meta.json"), br#"{"otra_cosa": 1}"#).unwrap();
+    let error = match SemanticIndex::open(dir.path(), None) {
+        Ok(_) => panic!("an unrecognised meta.json must fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("corrupt meta.json"), "{error}");
+}

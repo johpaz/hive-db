@@ -47,3 +47,35 @@ fn concurrent_upserts_never_mix_text_and_vector_generations() {
     let vector_is_alpha = alpha_vector[0].score > 0.99;
     assert_eq!(is_alpha, vector_is_alpha);
 }
+
+/// El camino que siguen hive y hive-sdk al arrancar: `HiveDB::open` sin
+/// opciones sobre una base cuyo `meta.json` escribió 0.3.x.
+#[test]
+fn hive_db_opens_a_database_created_by_0_3() {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    copy(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../hivedb-index/tests/fixtures/v0.3.1"),
+        dir.path(),
+    );
+
+    let db = HiveDB::open(dir.path()).unwrap();
+    db.upsert_doc(&IndexDoc::new("tool:web_search").with_body("buscar en la web"))
+        .unwrap();
+    let hits = db
+        .query_hybrid(HybridQuery::default().with_text("buscar").with_k(1))
+        .unwrap();
+    assert_eq!(hits[0].id, "tool:web_search");
+}

@@ -158,6 +158,12 @@ No expongas `seq` ni `timestamp` en `EventInput`. Hay un test `compile_fail` (`t
 
 La búsqueda vectorial se activa explícitamente mediante `OpenOptions { vector: Some(VectorOptions { dimension, space_id }) }`. Sin configuración, la base funciona en modo BM25 y rechaza vectores. `meta.json` persiste versión de esquema, dimensión, `space_id` y métrica coseno; cualquier diferencia al reabrir falla con `VECTOR_SPACE_MISMATCH`.
 
+#### Bases creadas por 0.3.x
+
+El `meta.json` de 0.3.x sólo tenía `{"vector_dimension": N}`. Al abrir una base así, `resolve_database_meta()` la migra al esquema 2 con la configuración vectorial pedida en esa apertura y **conserva `vector_dimension`**, la única clave que lee 0.3.x: la base se puede volver a abrir con 0.3.x si hay que dar marcha atrás. La reescritura va por archivo temporal + rename. Un `meta.json` que ya tiene `schema_version` se compara y no se reescribe nunca.
+
+0.3.x no guardaba los documentos del índice en un almacén autoritativo (Tantivy sólo conserva `id` y `filters`), así que no hay nada que migrar: tras la primera apertura el índice semántico está vacío y el consumidor debe reindexar sus documentos. Colecciones y event-log no dependen de `meta.json` y quedan intactos; `vec/` se deja en disco sin usar. El fixture `crates/hivedb-index/tests/fixtures/v0.3.1`, generado con 0.3.1, cubre este camino.
+
 ### Persistencia, reconstrucción y compactación
 
 `semantic.redb` es la fuente de verdad de cada `IndexDoc` completo. Tantivy y HNSW son índices derivados: al abrir se reconstruyen desde documentos vivos, por lo que una reapertura nunca depende de un log vectorial parcialmente actualizado. Las mutaciones están serializadas por un `RwLock` de operación y aumentan una generación dentro de la misma transacción `redb`.

@@ -15,11 +15,25 @@ const STORE_FILE: &str = "semantic.redb";
 const DATABASE_META_FILE: &str = "meta.json";
 const SCHEMA_VERSION: u32 = 2;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct DatabaseMeta {
     schema_version: u32,
     metric: String,
     vector: Option<VectorConfig>,
+    /// Único campo del `meta.json` de 0.3.x. Se conserva al migrar una base de
+    /// esa versión para que 0.3.x pueda volver a abrirla si hay que dar marcha
+    /// atrás; no forma parte de la identidad del espacio vectorial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vector_dimension: Option<usize>,
+}
+
+impl DatabaseMeta {
+    /// Lo que debe coincidir entre aperturas: esquema, métrica y espacio.
+    fn same_space(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.metric == other.metric
+            && self.vector == other.vector
+    }
 }
 
 struct SemanticStore {
@@ -447,22 +461,49 @@ fn validate_documents(docs: &[IndexDoc], config: Option<&VectorConfig>) -> crate
 
 fn resolve_database_meta(base: &Path, vector: Option<&VectorConfig>) -> crate::Result<()> {
     let path = base.join(DATABASE_META_FILE);
-    let requested = DatabaseMeta {
+    let mut requested = DatabaseMeta {
         schema_version: SCHEMA_VERSION,
         metric: "cosine".into(),
         vector: vector.cloned(),
+        vector_dimension: None,
     };
     if path.exists() {
-        let stored: DatabaseMeta = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-        if stored != requested {
-            return Err(crate::IndexError::VectorSpaceMismatch(format!(
-                "stored configuration {stored:?} does not match requested {requested:?}"
-            )));
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path)?).map_err(corrupt_meta)?;
+        if raw.get("schema_version").is_some() {
+            let stored: DatabaseMeta = serde_json::from_value(raw).map_err(corrupt_meta)?;
+            if !stored.same_space(&requested) {
+                return Err(crate::IndexError::VectorSpaceMismatch(format!(
+                    "stored configuration {stored:?} does not match requested {requested:?}"
+                )));
+            }
+            return Ok(());
         }
-        return Ok(());
+        // `meta.json` de 0.3.x: sólo `{"vector_dimension": N}`. Esa versión no
+        // guardaba los documentos del índice en ningún almacén autoritativo
+        // —Tantivy sólo conserva `id` y `filters`—, así que no hay nada que
+        // traer: el índice semántico arranca vacío y el consumidor reindexa.
+        // Colecciones y log no dependen de este archivo.
+        let legacy_dimension = raw
+            .get("vector_dimension")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| corrupt_meta("missing schema_version"))?;
+        requested.vector_dimension = Some(legacy_dimension as usize);
     }
-    std::fs::write(path, serde_json::to_vec_pretty(&requested)?)?;
+    write_database_meta(&path, &requested)
+}
+
+/// Escribe `meta.json` vía archivo temporal + rename: migrar una base existente
+/// reescribe el archivo, y uno a medio escribir la dejaría sin poder abrirse.
+fn write_database_meta(path: &Path, meta: &DatabaseMeta) -> crate::Result<()> {
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, serde_json::to_vec_pretty(meta)?)?;
+    std::fs::rename(&temp, path)?;
     Ok(())
+}
+
+fn corrupt_meta(cause: impl std::fmt::Display) -> crate::IndexError {
+    crate::IndexError::Storage(format!("corrupt {DATABASE_META_FILE}: {cause}"))
 }
 
 fn build_vector_index(

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HiveDB, HiveDBError } from "../src/index.ts";
@@ -74,5 +74,30 @@ describe("G11 semantic index integrity", () => {
     } finally {
       reopened.close();
     }
+  });
+
+  it("opens a database created by 0.3.x without options", async () => {
+    // Lo que hacen hive y hive-sdk al arrancar sobre una instalación existente.
+    const path = tempDir();
+    cpSync(join(import.meta.dir, "../../../crates/hivedb-index/tests/fixtures/v0.3.1"), path, {
+      recursive: true,
+    });
+
+    const db = await HiveDB.open(path);
+    try {
+      await db.upsertDoc({ id: "tool:web_search", name: "web_search", body: "buscar en la web" });
+      const hits = await db.queryHybrid({ text: "buscar", k: 1 });
+      expect(hits[0].id).toBe("tool:web_search");
+    } finally {
+      db.close();
+    }
+
+    const meta = JSON.parse(readFileSync(join(path, "meta.json"), "utf8"));
+    expect(meta).toEqual({
+      schema_version: 2,
+      metric: "cosine",
+      vector: null,
+      vector_dimension: 384,
+    });
   });
 });

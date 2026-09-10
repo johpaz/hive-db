@@ -1207,3 +1207,4 @@ fn harness_loop_improves_across_similar_tasks() {
 - Upserts concurrentes sobre el mismo id nunca mezclan texto y vector de generaciones distintas.
 - Reapertura y `compactIndex()` reconstruyen Tantivy/HNSW desde documentos vivos en `semantic.redb`.
 - La capa Bun conserva códigos `INVALID_VECTOR`, `VECTOR_SPACE_MISMATCH` e `INDEX_DEGRADED`.
+- Abre bases creadas por 0.3.x (fixture `crates/hivedb-index/tests/fixtures/v0.3.1`): migra `meta.json` conservando `vector_dimension` para poder volver a 0.3.x, deja el índice vacío para reindexar y nunca reescribe un `meta.json` actual.
