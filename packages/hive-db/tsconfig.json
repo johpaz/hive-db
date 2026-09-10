@@ -4,7 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022"],
-    "types": ["bun-types"],
+    "types": ["bun"],
     "outDir": "dist",
     "rootDir": "src",
     "declaration": true,

@@ -1,5 +1,8 @@
 {
   "name": "hivebd",
+  "engines": {
+    "bun": ">=1.4.2"
+  },
   "workspaces": [
     "packages/*"
   ]

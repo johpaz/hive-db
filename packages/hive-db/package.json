@@ -1,6 +1,6 @@
 {
   "name": "@johpaz/hive-db",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Motor de base de datos embebido, local-first y agent-native: event-log inmutable, proyecciones deterministas, búsqueda híbrida BM25+ANN y grafo de consentimiento.",
   "license": "Apache-2.0",
   "repository": {
@@ -61,7 +61,7 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.7.2",
-    "bun-types": "latest",
+    "@types/bun": "^1.4.2",
     "typescript": "^5"
   }
 }

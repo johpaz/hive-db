@@ -112,11 +112,11 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - name: Install dependencies
         working-directory: packages/hive-db
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Build native binding
         working-directory: packages/hive-db
@@ -151,7 +151,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -169,7 +169,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: packages/hive-db
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Download linux-x64-gnu bindings
         uses: actions/download-artifact@v4
@@ -198,7 +198,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -208,7 +208,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: packages/hive-db
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Create npm dirs
         working-directory: packages/hive-db
