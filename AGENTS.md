@@ -82,7 +82,7 @@ crates/hivedb-core/tests/
 
 ## Workarounds conocidos
 
-- `zstd-sys = 2.0.9` está fijado en `Cargo.lock` porque `zstd-safe 6.0.6` (traído por `tantivy 0.21`) falla con `zstd-sys 2.0.16`. No actualizar `zstd-sys` sin verificar `cargo test --workspace`.
+- Desde tantivy 0.22 ya no hace falta fijar `zstd-sys` (el workaround de 0.21 se eliminó). `Cargo.lock` sigue commiteado.
 - `Cargo.lock` **está commiteado** (no en `.gitignore`) precisamente para preservar el fijado de `zstd-sys` en CI. No removerlo del repo.
 
 ## Puntos de extensión comunes

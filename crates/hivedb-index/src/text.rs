@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, QueryParser, TermQuery};
+use tantivy::schema::Value as _;
 use tantivy::schema::{
     Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions,
 };
@@ -112,7 +113,7 @@ impl TextIndex {
 
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommit)
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()?;
         let writer = Mutex::new(index.writer(WRITER_HEAP_BYTES)?);
 
@@ -149,7 +150,7 @@ impl TextIndex {
     fn upsert_with_writer(&self, writer: &IndexWriter, doc: &IndexDoc) -> crate::Result<()> {
         writer.delete_term(Term::from_field_text(self.id_field, &doc.id));
 
-        let mut document = tantivy::schema::Document::default();
+        let mut document = tantivy::TantivyDocument::default();
         document.add_text(self.id_field, &doc.id);
         if let Some(name) = &doc.name {
             document.add_text(self.name_field, name);
@@ -216,9 +217,9 @@ impl TextIndex {
 
         let mut ranked = Vec::with_capacity(results.len());
         for (rank, (score, doc_address)) in results.iter().enumerate() {
-            let doc = searcher.doc(*doc_address)?;
+            let doc = searcher.doc::<tantivy::TantivyDocument>(*doc_address)?;
             if let Some(id_value) = doc.get_first(self.id_field)
-                && let Some(id) = id_value.as_text()
+                && let Some(id) = id_value.as_str()
             {
                 ranked.push((id.to_string(), rank + 1, *score));
             }
@@ -253,9 +254,9 @@ impl TextIndex {
 
         let mut ids = Vec::with_capacity(addresses.len());
         for addr in addresses {
-            let doc = searcher.doc(addr)?;
+            let doc = searcher.doc::<tantivy::TantivyDocument>(addr)?;
             if let Some(id_value) = doc.get_first(self.id_field)
-                && let Some(id) = id_value.as_text()
+                && let Some(id) = id_value.as_str()
             {
                 ids.push(id.to_string());
             }
@@ -275,10 +276,10 @@ impl TextIndex {
         let results = searcher.search(&query, &tantivy::collector::TopDocs::with_limit(1))?;
         match results.first() {
             Some((_score, addr)) => {
-                let doc = searcher.doc(*addr)?;
+                let doc = searcher.doc::<tantivy::TantivyDocument>(*addr)?;
                 let tokens = doc
                     .get_all(self.filters_field)
-                    .filter_map(|v| v.as_text().map(str::to_string))
+                    .filter_map(|v| v.as_str().map(str::to_string))
                     .collect();
                 Ok(Some(tokens))
             }
