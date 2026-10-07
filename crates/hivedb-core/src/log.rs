@@ -346,9 +346,13 @@ impl EventLog {
 
     /// Read a single event by sequence number.
     pub(crate) fn read(&self, seq: u64) -> HiveResult<Event> {
-        let agent_id = match self.seq_to_agent.get(&seq) {
-            Some(entry) => entry.value().clone(),
-            None => return Err(HiveError::NotFound(format!("event seq={seq}"))),
+        let cached = self
+            .seq_to_agent
+            .get(&seq)
+            .map(|entry| entry.value().clone());
+        let agent_id = match cached {
+            Some(agent_id) => agent_id,
+            None => return self.locate_and_read(seq),
         };
         match self.shard_for_read(&agent_id)? {
             Some(shard) => match shard.read_event(seq)? {
@@ -357,6 +361,25 @@ impl EventLog {
             },
             None => Err(HiveError::NotFound(format!("shard for agent {agent_id}"))),
         }
+    }
+
+    /// Busca `seq` en los shards cuando `seq_to_agent` no lo conoce.
+    ///
+    /// Tras un cierre ordenado el índice seq → agente arranca vacío (rellenarlo
+    /// exigiría recorrer todos los eventos al abrir), así que los eventos de
+    /// sesiones anteriores no están en él. Cada acierto se cachea. Un `seq`
+    /// fuera de rango se descarta sin tocar ningún shard.
+    fn locate_and_read(&self, seq: u64) -> HiveResult<Event> {
+        if seq == 0 || seq > self.last_seq()? {
+            return Err(HiveError::NotFound(format!("event seq={seq}")));
+        }
+        for agent_id in self.all_agents() {
+            if let Some(event) = self.get_or_create_shard(&agent_id)?.read_event(seq)? {
+                self.seq_to_agent.insert(seq, agent_id);
+                return Ok(event);
+            }
+        }
+        Err(HiveError::NotFound(format!("event seq={seq}")))
     }
 
     /// Returns the highest assigned sequence number, or 0 if the log is empty.

@@ -192,6 +192,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consultas_vec: Vec<Vec<f32>> = (0..consultas).map(|i| generar(&mut rng, i)).collect();
     let consultas_txt: Vec<String> = (0..consultas).map(|_| rng.texto(2)).collect();
 
+    // HIVE_BENCH_EXPORT=ruta vuelca corpus y consultas (f32 little-endian,
+    // fila a fila) para que los comparadores usen exactamente los mismos datos.
+    if let Ok(ruta) = std::env::var("HIVE_BENCH_EXPORT") {
+        std::fs::create_dir_all(&ruta)?;
+        let volcar = |nombre: &str, filas: &[Vec<f32>]| -> std::io::Result<()> {
+            let bytes: Vec<u8> = filas
+                .iter()
+                .flatten()
+                .flat_map(|x| x.to_le_bytes())
+                .collect();
+            std::fs::write(Path::new(&ruta).join(nombre), bytes)
+        };
+        volcar("vectors.f32", &vectores)?;
+        volcar("queries.f32", &consultas_vec)?;
+        println!("exportado en {ruta}: {docs} vectores, {consultas} consultas, dim {DIMENSION}");
+    }
+
     let dir = tempfile::tempdir()?;
     let config = Some(VectorConfig::new(DIMENSION, "bench:384"));
     let documentos: Vec<IndexDoc> = (0..docs)
@@ -232,7 +249,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let recall = recall_at_k(&index, &vectores, &consultas_vec)?;
 
     let rss_poblado = rss_mib();
+    let t = Instant::now();
     drop(index);
+    let cierre = t.elapsed();
     let disco = tamano_dir(dir.path());
 
     let t = Instant::now();
@@ -255,6 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "arranque_en_frio_ms={} vectores_vivos={vivos}",
         arranque.as_millis()
     );
+    println!("cierre_ms={}", cierre.as_millis());
     println!("disco_mib={:.1}", disco as f64 / 1_048_576.0);
     println!("rss_mib={rss_poblado:.1}");
     Ok(())

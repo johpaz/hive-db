@@ -5,14 +5,16 @@ use crate::types::{Fusion, Hit, HybridQuery, IndexDoc, ScalarFilter, VectorConfi
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const DOCS: TableDefinition<&str, Vec<u8>> = TableDefinition::new("semantic_docs");
 const META: TableDefinition<&str, u64> = TableDefinition::new("semantic_meta");
 const GENERATION_KEY: &str = "generation";
 const STORE_FILE: &str = "semantic.redb";
 const DATABASE_META_FILE: &str = "meta.json";
+const GRAPH_DIR: &str = "hnsw";
 const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -167,6 +169,10 @@ pub struct SemanticIndex {
     store: SemanticStore,
     vector_config: Option<VectorConfig>,
     state: RwLock<DerivedState>,
+    /// Directorio del volcado del grafo ANN; `None` en índices en RAM.
+    graph_dir: Option<PathBuf>,
+    /// `true` si el volcado en disco coincide con el grafo en memoria.
+    graph_saved: AtomicBool,
     _temp_dir: Option<tempfile::TempDir>,
 }
 
@@ -202,7 +208,22 @@ impl SemanticIndex {
         let text = TextIndex::open(fts_dir)?;
         text.clear()?;
         text.upsert_batch(&documents)?;
-        let vector = build_vector_index(vector_config.as_ref(), &documents)?;
+        let graph_dir = base.join(GRAPH_DIR);
+        let expected_live = documents.iter().filter(|doc| doc.vector.is_some()).count();
+        let loaded = vector_config.as_ref().and_then(|config| {
+            VectorIndex::load(
+                &graph_dir,
+                config.dimension,
+                generation,
+                &config.space_id,
+                expected_live,
+            )
+        });
+        let graph_saved = loaded.is_some();
+        let vector = match loaded {
+            Some(index) => Some(index),
+            None => build_vector_index(vector_config.as_ref(), &documents)?,
+        };
 
         Ok(Self {
             store,
@@ -212,8 +233,34 @@ impl SemanticIndex {
                 vector,
                 generation,
             }),
+            graph_dir: temp_dir.is_none().then_some(graph_dir),
+            graph_saved: AtomicBool::new(graph_saved),
             _temp_dir: temp_dir,
         })
+    }
+
+    /// Vuelca el grafo ANN a disco si cambió desde la última carga o volcado,
+    /// para que la próxima apertura no tenga que reconstruirlo. Se llama sola
+    /// al cerrar; es seguro llamarla antes. Los índices en RAM no se vuelcan.
+    pub fn persist_vector_graph(&self) -> crate::Result<()> {
+        let (Some(graph_dir), Some(config)) =
+            (self.graph_dir.as_ref(), self.vector_config.as_ref())
+        else {
+            return Ok(());
+        };
+        if self.graph_saved.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let state = self.state.read().unwrap();
+        let Some(vector) = state.vector.as_ref() else {
+            return Ok(());
+        };
+        if state.generation != self.store.generation()? {
+            return Ok(());
+        }
+        vector.dump(graph_dir, state.generation, &config.space_id)?;
+        self.graph_saved.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub fn upsert(&self, doc: &IndexDoc) -> crate::Result<()> {
@@ -367,6 +414,7 @@ impl SemanticIndex {
         generation: u64,
         update: crate::Result<()>,
     ) -> crate::Result<()> {
+        self.graph_saved.store(false, Ordering::Release);
         if let Err(update_error) = update {
             if let Err(rebuild_error) = self.rebuild_state(state) {
                 return Err(crate::IndexError::IndexUnavailableAfterCommit {
@@ -402,6 +450,7 @@ impl SemanticIndex {
     }
 
     fn rebuild_state(&self, state: &mut DerivedState) -> crate::Result<()> {
+        self.graph_saved.store(false, Ordering::Release);
         let documents = self.store.load_all()?;
         validate_documents(&documents, self.vector_config.as_ref())?;
         state.text.clear()?;
@@ -412,9 +461,16 @@ impl SemanticIndex {
     }
 
     fn rebuild_vector(&self, state: &mut DerivedState) -> crate::Result<()> {
+        self.graph_saved.store(false, Ordering::Release);
         let documents = self.store.load_all()?;
         state.vector = build_vector_index(self.vector_config.as_ref(), &documents)?;
         Ok(())
+    }
+
+    /// `true` si el volcado del grafo ANN en disco coincide con el de memoria
+    /// (se restauró al abrir o se volcó desde entonces).
+    pub fn vector_graph_persisted(&self) -> bool {
+        self.graph_saved.load(Ordering::Acquire)
     }
 
     pub fn vector_dimension(&self) -> Option<usize> {
@@ -428,6 +484,13 @@ impl SemanticIndex {
             .vector
             .as_ref()
             .map(VectorIndex::stats)
+    }
+}
+
+impl Drop for SemanticIndex {
+    fn drop(&mut self) {
+        // Mejor esfuerzo: si falla, la próxima apertura reconstruye el grafo.
+        let _ = self.persist_vector_graph();
     }
 }
 

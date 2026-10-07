@@ -1,5 +1,10 @@
+use hnsw_rs::api::AnnT;
+use hnsw_rs::hnswio::HnswIo;
 use hnsw_rs::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::sync::Mutex;
 
 pub const MAX_VECTOR_DIMENSION: usize = 65_536;
@@ -7,6 +12,41 @@ pub const MAX_VECTOR_DIMENSION: usize = 65_536;
 /// `ef` de búsqueda HNSW por defecto. Con 50 el recall@10 era 0,27 (aleatorio)
 /// y 0,73 (agrupado) en 10k docs; con 200 sube a 0,62 y 0,87.
 pub const DEFAULT_EF_SEARCH: usize = 200;
+
+const GRAPH_BASENAME: &str = "vectors";
+const GRAPH_META_FILE: &str = "vectors.meta";
+const GRAPH_DUMP_VERSION: u32 = 1;
+
+/// Metadatos del volcado del grafo. Se escribe al final y por rename: sin
+/// este archivo el volcado se considera inexistente.
+#[derive(Serialize, Deserialize)]
+struct DumpMeta {
+    version: u32,
+    generation: u64,
+    space_id: String,
+    dimension: usize,
+    ids: Vec<String>,
+    deleted: Vec<usize>,
+    graph_len: u64,
+    data_len: u64,
+}
+
+/// Carga el grafo tomando el `HnswIo` por valor, para que el resultado no
+/// dependa de un préstamo local.
+fn load_static(io: &'static mut HnswIo) -> Option<Hnsw<'static, f32, DistCosine>> {
+    io.load_hnsw::<f32, DistCosine>().ok()
+}
+
+fn move_dump_files(from: &Path, to: &Path) -> std::io::Result<()> {
+    for suffix in ["hnsw.graph", "hnsw.data"] {
+        std::fs::rename(dump_file(from, suffix), dump_file(to, suffix))?;
+    }
+    Ok(())
+}
+
+fn dump_file(dir: &Path, suffix: &str) -> std::path::PathBuf {
+    dir.join(format!("{GRAPH_BASENAME}.{suffix}"))
+}
 
 /// In-memory HNSW state. Durable vectors live in the semantic redb store;
 /// this graph is a derived index that can always be rebuilt.
@@ -138,6 +178,116 @@ impl VectorIndex {
             }
         }
         Ok(results)
+    }
+
+    /// Vuelca el grafo a `dir` para evitar reconstruirlo en la próxima apertura.
+    ///
+    /// El grafo es un índice derivado: cualquier fallo aquí es recuperable (la
+    /// siguiente apertura lo reconstruye), así que el llamador puede ignorarlo.
+    pub fn dump(&self, dir: &Path, generation: u64, space_id: &str) -> crate::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        // Invalida el volcado anterior antes de tocar sus archivos.
+        let meta_path = dir.join(GRAPH_META_FILE);
+        match std::fs::remove_file(&meta_path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
+
+        let inner = self.inner.lock().unwrap();
+        if inner.ids.is_empty() {
+            return Ok(());
+        }
+        // `file_dump` renombra a un nombre único si ya existen archivos del
+        // mismo nombre (p. ej. en un grafo recargado), así que se vuelca en un
+        // subdirectorio vacío y luego se mueven los archivos sobre los viejos.
+        let staging = dir.join("staging");
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)?;
+        let dumped = catch_unwind(AssertUnwindSafe(|| {
+            inner.hnsw.file_dump(&staging, GRAPH_BASENAME)
+        }));
+        let outcome = match dumped {
+            Ok(Ok(basename)) if basename == GRAPH_BASENAME => {
+                move_dump_files(&staging, dir).map_err(crate::IndexError::from)
+            }
+            Ok(Ok(other)) => Err(crate::IndexError::Storage(format!(
+                "hnsw dump used unexpected basename {other}"
+            ))),
+            Ok(Err(error)) => Err(crate::IndexError::Storage(error.to_string())),
+            Err(_) => Err(crate::IndexError::Storage("hnsw dump panicked".into())),
+        };
+        let _ = std::fs::remove_dir_all(&staging);
+        outcome?;
+
+        let meta = DumpMeta {
+            version: GRAPH_DUMP_VERSION,
+            generation,
+            space_id: space_id.to_string(),
+            dimension: self.dimension,
+            ids: inner.ids.clone(),
+            deleted: inner.deleted.iter().copied().collect(),
+            graph_len: std::fs::metadata(dump_file(dir, "hnsw.graph"))?.len(),
+            data_len: std::fs::metadata(dump_file(dir, "hnsw.data"))?.len(),
+        };
+        let temp = meta_path.with_extension("meta.tmp");
+        std::fs::write(&temp, bincode::serialize(&meta)?)?;
+        std::fs::rename(&temp, &meta_path)?;
+        Ok(())
+    }
+
+    /// Carga un volcado previo si coincide exactamente con el estado esperado.
+    ///
+    /// Devuelve `None` ante cualquier duda (archivos ausentes, otra generación,
+    /// otro espacio, truncados o ilegibles): el llamador reconstruye desde los
+    /// documentos, que son la fuente de verdad.
+    pub fn load(
+        dir: &Path,
+        dimension: usize,
+        generation: u64,
+        space_id: &str,
+        expected_live: usize,
+    ) -> Option<Self> {
+        let raw = std::fs::read(dir.join(GRAPH_META_FILE)).ok()?;
+        let meta: DumpMeta = bincode::deserialize(&raw).ok()?;
+        let live = meta.ids.len().checked_sub(meta.deleted.len())?;
+        if meta.version != GRAPH_DUMP_VERSION
+            || meta.generation != generation
+            || meta.space_id != space_id
+            || meta.dimension != dimension
+            || live != expected_live
+            || std::fs::metadata(dump_file(dir, "hnsw.graph")).ok()?.len() != meta.graph_len
+            || std::fs::metadata(dump_file(dir, "hnsw.data")).ok()?.len() != meta.data_len
+        {
+            return None;
+        }
+
+        // `load_hnsw` toma prestado el `HnswIo`; se filtra (unos bytes, sin mmap)
+        // para obtener un grafo `'static`.
+        let io: &'static mut HnswIo = Box::leak(Box::new(HnswIo::new(dir, GRAPH_BASENAME)));
+        // El `Option` fuerza a mover (no reborrow) la referencia `'static`.
+        let mut slot = Some(io);
+        let hnsw = catch_unwind(AssertUnwindSafe(|| load_static(slot.take()?))).ok()??;
+        if hnsw.get_nb_point() != meta.ids.len() {
+            return None;
+        }
+
+        let deleted: HashSet<usize> = meta.deleted.into_iter().collect();
+        let latest = meta
+            .ids
+            .iter()
+            .enumerate()
+            .filter(|(internal_id, _)| !deleted.contains(internal_id))
+            .map(|(internal_id, id)| (id.clone(), internal_id))
+            .collect();
+        Some(Self {
+            inner: Mutex::new(Inner {
+                hnsw,
+                ids: meta.ids,
+                latest,
+                deleted,
+            }),
+            dimension,
+        })
     }
 
     pub fn should_compact(&self) -> bool {
