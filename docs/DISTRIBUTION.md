@@ -20,13 +20,13 @@ import { HiveDB } from "@johpaz/hive-db";
 
 ```bash
 cd mi-otro-proyecto
-bun add file:../ruta/a/hiveBD/packages/hive-db
+bun add file:../ruta/a/hive-db/packages/hive-db
 ```
 
 ### c) Con `bun link` (desarrollo activo)
 
 ```bash
-cd hiveBD/packages/hive-db && bun link
+cd hive-db/packages/hive-db && bun link
 cd mi-otro-proyecto && bun link @johpaz/hive-db
 ```
 

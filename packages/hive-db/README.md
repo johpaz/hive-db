@@ -57,10 +57,10 @@ db.close();
 
 ## Documentación completa
 
-- [`SPEC.md`](https://github.com/johpaz/hiveBD/blob/main/SPEC.md) — especificación del motor y arquitectura de capas.
-- [`docs/USER_GUIDE.md`](https://github.com/johpaz/hiveBD/blob/main/docs/USER_GUIDE.md) — guía de uso desde Bun/TypeScript, con ejemplos de cada API.
-- [`docs/IMPLEMENTATION.md`](https://github.com/johpaz/hiveBD/blob/main/docs/IMPLEMENTATION.md) — manual de implementación y extensión del motor.
-- [`docs/DISTRIBUTION.md`](https://github.com/johpaz/hiveBD/blob/main/docs/DISTRIBUTION.md) — cómo se distribuyen los binarios multiplataforma.
+- [`SPEC.md`](https://github.com/johpaz/hive-db/blob/main/SPEC.md) — especificación del motor y arquitectura de capas.
+- [`docs/USER_GUIDE.md`](https://github.com/johpaz/hive-db/blob/main/docs/USER_GUIDE.md) — guía de uso desde Bun/TypeScript, con ejemplos de cada API.
+- [`docs/IMPLEMENTATION.md`](https://github.com/johpaz/hive-db/blob/main/docs/IMPLEMENTATION.md) — manual de implementación y extensión del motor.
+- [`docs/DISTRIBUTION.md`](https://github.com/johpaz/hive-db/blob/main/docs/DISTRIBUTION.md) — cómo se distribuyen los binarios multiplataforma.
 
 ## Principios de diseño
 

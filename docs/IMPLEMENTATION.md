@@ -7,7 +7,7 @@
 ## 1. Estructura del workspace
 
 ```
-hiveBD/
+hive-db/
 ├── Cargo.toml                 # workspace Rust
 ├── package.json               # workspace Bun
 ├── README.md
