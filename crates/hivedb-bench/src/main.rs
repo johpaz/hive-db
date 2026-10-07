@@ -169,6 +169,50 @@ fn recall_at_k(
     Ok(aciertos as f64 / (consultas.len() * K) as f64)
 }
 
+/// Barrido de `ef` de búsqueda: recall@K y latencia vectorial p50 por valor.
+/// La verdad exacta se calcula una sola vez.
+fn barrido_ef(
+    index: &SemanticIndex,
+    vectores: &[Vec<f32>],
+    consultas: &[Vec<f32>],
+    valores: &[usize],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let verdades: Vec<Vec<String>> = consultas
+        .iter()
+        .map(|q| {
+            let mut exacto: Vec<(usize, f32)> = vectores
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (i, dot(q, v)))
+                .collect();
+            exacto.sort_by(|a, b| b.1.total_cmp(&a.1));
+            exacto
+                .iter()
+                .take(K)
+                .map(|(i, _)| format!("doc-{i}"))
+                .collect()
+        })
+        .collect();
+    for &ef in valores {
+        let mut aciertos = 0usize;
+        let (p50, p99) = medir(consultas.len(), |i| {
+            let q = HybridQuery::default()
+                .with_vector(consultas[i].clone())
+                .with_k(K)
+                .with_ef_search(ef);
+            let hits = index.query_hybrid(q).expect("ef");
+            aciertos += hits.iter().filter(|h| verdades[i].contains(&h.id)).count();
+        });
+        let recall = aciertos as f64 / (consultas.len() * K) as f64;
+        println!(
+            "ef={ef} recall_at_{K}={recall:.4} vector_p50_us={} vector_p99_us={}",
+            us(p50),
+            us(p99)
+        );
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let docs: usize = args
@@ -247,6 +291,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let recall = recall_at_k(&index, &vectores, &consultas_vec)?;
+
+    // HIVE_BENCH_EF=50,200,800 mide recall y latencia vectorial para cada `ef`.
+    if let Ok(lista) = std::env::var("HIVE_BENCH_EF") {
+        let valores: Vec<usize> = lista
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        barrido_ef(&index, &vectores, &consultas_vec, &valores)?;
+    }
 
     let rss_poblado = rss_mib();
     let t = Instant::now();

@@ -1,0 +1,7 @@
+# lancedb-flat docs=10000 consultas=1000 dim=384 k=10
+ingesta_docs_por_s=9885
+vector_p50_us=9504 vector_p99_us=15431
+recall_at_10=1.0000
+arranque_en_frio_ms=25
+disco_mib=14.7
+rss_mib=613.0
