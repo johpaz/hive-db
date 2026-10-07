@@ -551,3 +551,66 @@ fn in_ram_index_supports_full_lifecycle() {
         .unwrap();
     assert!(hits.is_empty());
 }
+
+#[test]
+fn ef_search_mejora_recall_vectorial() {
+    // Corpus pseudoaleatorio determinista: con `ef` bajo el recall@10 cae
+    // frente al exacto; con `ef` alto debe superar claramente al bajo.
+    let dir = tempfile::tempdir().unwrap();
+    let index = SemanticIndex::open(dir.path(), Some(VectorConfig::new(32, "test:32"))).unwrap();
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+    };
+    let vectors: Vec<Vec<f32>> = (0..2_000)
+        .map(|_| (0..32).map(|_| next()).collect())
+        .collect();
+    let docs: Vec<IndexDoc> = vectors
+        .iter()
+        .enumerate()
+        .map(|(i, v)| IndexDoc::new(format!("d{i}")).with_vector(v.clone()))
+        .collect();
+    index.upsert_batch(&docs).unwrap();
+
+    let queries: Vec<Vec<f32>> = (0..30).map(|_| (0..32).map(|_| next()).collect()).collect();
+    let recall = |ef: usize| {
+        let mut hits_ok = 0;
+        for q in &queries {
+            let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let mut exact: Vec<(usize, f32)> = vectors
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let dot: f32 = v.iter().zip(q).map(|(a, b)| a * b).sum();
+                    (i, dot / (norm(v) * norm(q)))
+                })
+                .collect();
+            exact.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let truth: Vec<String> = exact
+                .iter()
+                .take(10)
+                .map(|(i, _)| format!("d{i}"))
+                .collect();
+            let got = index
+                .query_hybrid(
+                    HybridQuery::default()
+                        .with_vector(q.clone())
+                        .with_k(10)
+                        .with_ef_search(ef),
+                )
+                .unwrap();
+            hits_ok += got.iter().filter(|h| truth.contains(&h.id)).count();
+        }
+        hits_ok as f64 / (queries.len() * 10) as f64
+    };
+    let bajo = recall(10);
+    let alto = recall(800);
+    assert!(
+        alto >= bajo,
+        "ef alto ({alto}) no debe empeorar a ef bajo ({bajo})"
+    );
+    assert!(alto > 0.9, "ef=800 debe dar recall@10 > 0.9, dio {alto}");
+}

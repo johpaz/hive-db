@@ -164,6 +164,7 @@ interface JsHybridQuery {
   filters?: JsScalarFilter[];
   fusion?: JsFusion;
   boosts?: JsFieldBoosts;
+  efSearch?: number;
 }
 
 interface JsFusion {
@@ -317,6 +318,8 @@ export interface HybridQuery {
   filters?: ScalarFilter[];
   fusion?: Fusion;
   boosts?: FieldBoosts;
+  /** HNSW search width: higher = better recall, more latency (default 200). */
+  efSearch?: number;
 }
 
 /**

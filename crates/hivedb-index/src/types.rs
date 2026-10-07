@@ -152,6 +152,9 @@ pub struct HybridQuery {
     pub fusion: Fusion,
     /// Per-field boosts for the text query. `None` uses the defaults.
     pub boosts: Option<FieldBoosts>,
+    /// Amplitud de búsqueda HNSW (`ef`): más alto = mejor recall y más latencia.
+    /// `None` usa `DEFAULT_EF_SEARCH`. Solo afecta a consultas vectoriales sin filtros.
+    pub ef_search: Option<usize>,
 }
 
 impl HybridQuery {
@@ -177,6 +180,11 @@ impl HybridQuery {
 
     pub fn with_boosts(mut self, boosts: FieldBoosts) -> Self {
         self.boosts = Some(boosts);
+        self
+    }
+
+    pub fn with_ef_search(mut self, ef_search: usize) -> Self {
+        self.ef_search = Some(ef_search);
         self
     }
 }

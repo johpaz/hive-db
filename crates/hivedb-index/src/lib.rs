@@ -7,7 +7,7 @@ pub mod rrf;
 pub mod text;
 pub mod types;
 
-pub use hnsw::VectorIndex;
+pub use hnsw::{DEFAULT_EF_SEARCH, VectorIndex};
 pub use index::SemanticIndex;
 pub use rrf::rrf;
 pub use text::TextIndex;

@@ -81,6 +81,7 @@ pub struct JsHybridQuery {
     pub filters: Option<Vec<JsScalarFilter>>,
     pub fusion: Option<JsFusion>,
     pub boosts: Option<JsFieldBoosts>,
+    pub ef_search: Option<u32>,
 }
 
 #[napi(object)]
@@ -326,6 +327,7 @@ fn js_to_hybrid_query(query: JsHybridQuery) -> Result<HybridQuery> {
         filters,
         fusion,
         boosts,
+        ef_search: query.ef_search.map(|v| v as usize),
     })
 }
 

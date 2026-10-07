@@ -4,6 +4,10 @@ use std::sync::Mutex;
 
 pub const MAX_VECTOR_DIMENSION: usize = 65_536;
 
+/// `ef` de búsqueda HNSW por defecto. Con 50 el recall@10 era 0,27 (aleatorio)
+/// y 0,73 (agrupado) en 10k docs; con 200 sube a 0,62 y 0,87.
+pub const DEFAULT_EF_SEARCH: usize = 200;
+
 /// In-memory HNSW state. Durable vectors live in the semantic redb store;
 /// this graph is a derived index that can always be rebuilt.
 struct Inner {
@@ -88,7 +92,12 @@ impl VectorIndex {
         Ok(())
     }
 
-    pub fn search(&self, vector: &[f32], k: usize) -> crate::Result<Vec<(String, usize, f32)>> {
+    pub fn search(
+        &self,
+        vector: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> crate::Result<Vec<(String, usize, f32)>> {
         validate_vector(vector, self.dimension)?;
         if k == 0 {
             return Err(crate::IndexError::InvalidVector(
@@ -101,7 +110,7 @@ impl VectorIndex {
             .saturating_mul(4)
             .max(k.saturating_add(inner.deleted.len()))
             .max(1);
-        let ef = want.max(50);
+        let ef = want.max(ef_search.unwrap_or(DEFAULT_EF_SEARCH));
         let neighbors = inner.hnsw.search(vector, want, ef);
 
         let mut results = Vec::with_capacity(k);

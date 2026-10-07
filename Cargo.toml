@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/hivedb-core", "crates/hivedb-index", "crates/hivedb-napi"]
+members = [
+    "crates/hivedb-core",
+    "crates/hivedb-index",
+    "crates/hivedb-napi",
+    "crates/hivedb-bench",
+]
 
 [workspace.package]
 version = "0.5.1"

@@ -641,6 +641,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
+name = "hivedb-bench"
+version = "0.5.1"
+dependencies = [
+ "hivedb-index",
+ "tempfile",
+]
+
+[[package]]
 name = "hivedb-core"
 version = "0.5.1"
 dependencies = [

@@ -312,7 +312,7 @@ impl SemanticIndex {
                     .vector
                     .as_ref()
                     .ok_or(crate::IndexError::VectorIndexDisabled)?
-                    .search(vector, query.k)?,
+                    .search(vector, query.k, query.ef_search)?,
             ),
             Some(vector) => Some(self.search_vector_filtered_exact(
                 &state.text,
