@@ -45,7 +45,7 @@ fn top(index: &SemanticIndex, seed: usize) -> Vec<String> {
 }
 
 fn graph_files(path: &Path) -> Vec<std::path::PathBuf> {
-    ["vectors.meta", "vectors.hnsw.graph", "vectors.hnsw.data"]
+    ["vectors.meta", "vectors.hnsw.graph"]
         .iter()
         .map(|name| path.join("hnsw").join(name))
         .collect()
@@ -125,10 +125,10 @@ fn un_volcado_corrupto_se_reconstruye_sin_fallar() {
     let dir = tempfile::tempdir().unwrap();
     populate(dir.path(), 200);
 
-    let data = dir.path().join("hnsw").join("vectors.hnsw.data");
-    let mut bytes = std::fs::read(&data).unwrap();
+    let graph = dir.path().join("hnsw").join("vectors.hnsw.graph");
+    let mut bytes = std::fs::read(&graph).unwrap();
     bytes.truncate(bytes.len() / 2);
-    std::fs::write(&data, bytes).unwrap();
+    std::fs::write(&graph, bytes).unwrap();
 
     let index = SemanticIndex::open(dir.path(), config()).unwrap();
     assert!(!index.vector_graph_persisted());

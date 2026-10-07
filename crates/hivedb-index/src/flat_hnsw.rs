@@ -26,11 +26,13 @@
 //!
 //! Los vectores se guardan normalizados (L2); la distancia es `1 - a·b`.
 
+use crate::vector_file::View;
 use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 const NO_NODE: u32 = u32::MAX;
 const MAX_LEVEL: usize = 15;
@@ -97,66 +99,6 @@ impl Visited {
     }
 }
 
-/// Vectores del grafo: un bloque restaurado (mapeado o en memoria) y una cola
-/// con los añadidos desde la carga.
-enum Base {
-    None,
-    #[cfg(not(windows))]
-    Mapped(memmap2::Mmap),
-    #[cfg_attr(not(windows), allow(dead_code))]
-    Owned(Vec<f32>),
-}
-
-struct Vectors {
-    dim: usize,
-    base: Base,
-    base_len: usize,
-    tail: Vec<f32>,
-}
-
-impl Vectors {
-    fn get(&self, id: u32) -> &[f32] {
-        let i = id as usize;
-        if i < self.base_len {
-            match &self.base {
-                #[cfg(not(windows))]
-                Base::Mapped(map) => {
-                    let bytes = &map[i * self.dim * 4..(i + 1) * self.dim * 4];
-                    bytemuck::cast_slice(bytes)
-                }
-                Base::Owned(all) => &all[i * self.dim..(i + 1) * self.dim],
-                Base::None => unreachable!("base_len > 0 sin base"),
-            }
-        } else {
-            let j = i - self.base_len;
-            &self.tail[j * self.dim..(j + 1) * self.dim]
-        }
-    }
-
-    /// Escribe todos los vectores, en orden, como `f32` little-endian.
-    fn write_to(&self, writer: &mut impl Write) -> std::io::Result<()> {
-        match &self.base {
-            #[cfg(not(windows))]
-            Base::Mapped(map) => writer.write_all(&map[..self.base_len * self.dim * 4])?,
-            Base::Owned(all) => write_f32s(writer, all)?,
-            Base::None => {}
-        }
-        write_f32s(writer, &self.tail)
-    }
-}
-
-fn write_f32s(writer: &mut impl Write, values: &[f32]) -> std::io::Result<()> {
-    let mut buffer = Vec::with_capacity(64 * 1024);
-    for chunk in values.chunks(16 * 1024) {
-        buffer.clear();
-        for value in chunk {
-            buffer.extend_from_slice(&value.to_le_bytes());
-        }
-        writer.write_all(&buffer)?;
-    }
-    Ok(())
-}
-
 /// Capa superior (≥ 1): solo contiene a los nodos cuyo nivel la alcanza.
 struct Upper {
     /// Fila → nodo.
@@ -173,15 +115,15 @@ pub(crate) struct Graph {
     m: usize,
     m0: usize,
     ef_construction: usize,
-    vectors: Vectors,
+    /// Vectores normalizados, en el fichero plano compartido con el almacén.
+    /// El id de cada nodo es su número de ranura.
+    view: Arc<View>,
     levels: Vec<u8>,
     l0: Vec<u32>,
     l0_len: Vec<u8>,
     upper: Vec<Upper>,
     entry: u32,
     max_level: usize,
-    /// `true` si hay vectores que no están en el fichero de datos restaurado.
-    vectors_dirty: bool,
 }
 
 /// Nivel de un nodo: geométrico con parámetro `1/ln(m)`, derivado del id para
@@ -196,41 +138,25 @@ fn level_for(id: u32, m: usize) -> usize {
 }
 
 impl Graph {
-    pub(crate) fn new(dim: usize, m: usize, ef_construction: usize) -> Self {
+    pub(crate) fn new(dim: usize, m: usize, ef_construction: usize, view: Arc<View>) -> Self {
         assert!(m >= 2 && 2 * m <= usize::from(u8::MAX));
         Self {
             dim,
             m,
             m0: 2 * m,
             ef_construction,
-            vectors: Vectors {
-                dim,
-                base: Base::None,
-                base_len: 0,
-                tail: Vec::new(),
-            },
+            view,
             levels: Vec::new(),
             l0: Vec::new(),
             l0_len: Vec::new(),
             upper: Vec::new(),
             entry: NO_NODE,
             max_level: 0,
-            vectors_dirty: true,
         }
     }
 
     pub(crate) fn len(&self) -> usize {
         self.levels.len()
-    }
-
-    /// `true` si el fichero de datos en disco ya contiene todos los vectores.
-    pub(crate) fn vectors_clean(&self) -> bool {
-        !self.vectors_dirty
-    }
-
-    /// Anota que el fichero de datos en disco ya tiene todos los vectores.
-    pub(crate) fn mark_vectors_persisted(&mut self) {
-        self.vectors_dirty = false;
     }
 
     fn neighbors(&self, layer: usize, node: u32) -> &[u32] {
@@ -260,18 +186,9 @@ impl Graph {
         }
     }
 
-    /// Añade un vector (lo normaliza) sin enlazarlo. Devuelve su id.
-    fn append(&mut self, vector: &[f32]) -> u32 {
-        debug_assert_eq!(vector.len(), self.dim);
+    /// Registra un nodo nuevo (su vector ya está en la vista) sin enlazarlo.
+    fn add_node(&mut self) -> u32 {
         let id = self.len() as u32;
-        let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm > 0.0 {
-            self.vectors.tail.extend(vector.iter().map(|x| x / norm));
-        } else {
-            self.vectors.tail.extend_from_slice(vector);
-        }
-        self.vectors_dirty = true;
-
         let level = level_for(id, self.m);
         self.levels.push(level as u8);
         self.l0.resize(self.l0.len() + self.m0, 0);
@@ -297,11 +214,14 @@ impl Graph {
         id
     }
 
-    /// Añade y enlaza todos los vectores. Devuelve el id del primero.
-    pub(crate) fn insert_batch(&mut self, vectors: &[&[f32]]) -> u32 {
+    /// Sigue al fichero de vectores: crea y enlaza un nodo por cada ranura
+    /// nueva de `view` (que debe incluir todas las anteriores).
+    pub(crate) fn extend(&mut self, view: Arc<View>) {
         let first = self.len() as u32;
-        for vector in vectors {
-            self.append(vector);
+        debug_assert!(view.slots() >= self.len());
+        self.view = view;
+        while self.len() < self.view.slots() {
+            self.add_node();
         }
         let end = self.len() as u32;
         let mut next = first;
@@ -315,14 +235,13 @@ impl Graph {
             self.link_chunk(next, stop);
             next = stop;
         }
-        first
     }
 
     fn greedy(&self, query: &[f32], mut best: (f32, u32), layer: usize) -> (f32, u32) {
         loop {
             let mut improved = false;
             for &neighbor in self.neighbors(layer, best.1) {
-                let d = dist(query, self.vectors.get(neighbor));
+                let d = dist(query, self.view.get(neighbor));
                 if d < best.0 {
                     best = (d, neighbor);
                     improved = true;
@@ -362,7 +281,7 @@ impl Graph {
                 if !visited.insert(neighbor) {
                     continue;
                 }
-                let dn = Dist::new(dist(query, self.vectors.get(neighbor)));
+                let dn = Dist::new(dist(query, self.view.get(neighbor)));
                 if results.len() < ef || results.peek().is_some_and(|worst| dn < worst.0) {
                     candidates.push(Reverse((dn, neighbor)));
                     results.push((dn, neighbor));
@@ -387,10 +306,10 @@ impl Graph {
             if selected.len() >= cap {
                 break;
             }
-            let vector = self.vectors.get(node);
+            let vector = self.view.get(node);
             let diverse = selected
                 .iter()
-                .all(|&(_, other)| dist(vector, self.vectors.get(other)) > d);
+                .all(|&(_, other)| dist(vector, self.view.get(other)) > d);
             if diverse {
                 selected.push((d, node));
             } else if keep_pruned {
@@ -411,10 +330,10 @@ impl Graph {
 
     /// Vecinos elegidos para un nodo nuevo, por capa (índice = capa).
     fn plan(&self, node: u32) -> Vec<Vec<u32>> {
-        let query = self.vectors.get(node);
+        let query = self.view.get(node);
         let level = usize::from(self.levels[node as usize]);
         let top = level.min(self.max_level);
-        let mut entry = (dist(query, self.vectors.get(self.entry)), self.entry);
+        let mut entry = (dist(query, self.view.get(self.entry)), self.entry);
         for layer in (top + 1..=self.max_level).rev() {
             entry = self.greedy(query, entry, layer);
         }
@@ -440,10 +359,10 @@ impl Graph {
         if all.len() <= cap {
             return all;
         }
-        let vector = self.vectors.get(node);
+        let vector = self.view.get(node);
         let mut scored: Vec<(f32, u32)> = all
             .iter()
-            .map(|&other| (dist(vector, self.vectors.get(other)), other))
+            .map(|&other| (dist(vector, self.view.get(other)), other))
             .collect();
         scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         self.select(&scored, cap, KEEP_PRUNED)
@@ -525,7 +444,7 @@ impl Graph {
         } else {
             query.to_vec()
         };
-        let mut entry = (dist(&query, self.vectors.get(self.entry)), self.entry);
+        let mut entry = (dist(&query, self.view.get(self.entry)), self.entry);
         for layer in (1..=self.max_level).rev() {
             entry = self.greedy(&query, entry, layer);
         }
@@ -559,16 +478,9 @@ impl Graph {
         out.flush()
     }
 
-    /// Escribe todos los vectores (normalizados) en `path`.
-    pub(crate) fn write_vectors(&self, path: &Path) -> std::io::Result<()> {
-        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
-        self.vectors.write_to(&mut out)?;
-        out.flush()
-    }
-
     /// Carga un grafo. Devuelve `None` ante cualquier incoherencia: el llamador
     /// reconstruye desde los documentos, que son la fuente de verdad.
-    pub(crate) fn read(graph_path: &Path, data_path: &Path, dim: usize) -> Option<Self> {
+    pub(crate) fn read(graph_path: &Path, view: Arc<View>, dim: usize) -> Option<Self> {
         let raw = std::fs::read(graph_path).ok()?;
         let mut cursor = Cursor { bytes: &raw, at: 0 };
         if cursor.take(8)? != GRAPH_MAGIC || cursor.u32()? != GRAPH_FORMAT {
@@ -659,67 +571,24 @@ impl Graph {
             return None;
         }
 
-        let file = std::fs::File::open(data_path).ok()?;
-        let expected_bytes = n.checked_mul(dim)?.checked_mul(4)?;
-        if usize::try_from(file.metadata().ok()?.len()).ok()? != expected_bytes {
+        if view.slots() != n {
             return None;
         }
-        let base = if n == 0 {
-            Base::None
-        } else {
-            map_vectors(&file, expected_bytes)?
-        };
 
         Some(Self {
             dim,
             m,
             m0,
             ef_construction,
-            vectors: Vectors {
-                dim,
-                base,
-                base_len: n,
-                tail: Vec::new(),
-            },
+            view,
             levels,
             l0,
             l0_len,
             upper,
             entry,
             max_level,
-            vectors_dirty: false,
         })
     }
-}
-
-#[cfg(not(windows))]
-fn map_vectors(file: &std::fs::File, expected_bytes: usize) -> Option<Base> {
-    // SAFETY: el fichero se mapea en solo lectura. Si otro proceso lo
-    // truncara mientras está mapeado, el acceso fallaría (SIGBUS); HiveDB es el
-    // único escritor de este directorio y lo reemplaza por rename, nunca in situ.
-    let map = unsafe { memmap2::Mmap::map(file) }.ok()?;
-    if map.len() != expected_bytes {
-        return None;
-    }
-    Some(Base::Mapped(map))
-}
-
-/// En Windows no se puede renombrar sobre un fichero mapeado, y el siguiente
-/// volcado lo hace: allí se lee a memoria.
-#[cfg(windows)]
-fn map_vectors(file: &std::fs::File, expected_bytes: usize) -> Option<Base> {
-    use std::io::Read;
-    let mut bytes = Vec::with_capacity(expected_bytes);
-    let mut reader = file;
-    reader.read_to_end(&mut bytes).ok()?;
-    if bytes.len() != expected_bytes {
-        return None;
-    }
-    let values = bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
-    Some(Base::Owned(values))
 }
 
 fn write_u32s(out: &mut impl Write, values: &[u32]) -> std::io::Result<()> {
@@ -766,6 +635,7 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vector_file::{VectorFile, normalized};
 
     const DIM: usize = 24;
 
@@ -790,23 +660,29 @@ mod tests {
             .collect()
     }
 
-    fn build(vectors: &[Vec<f32>]) -> Graph {
-        let mut graph = Graph::new(DIM, 12, 80);
-        let refs: Vec<&[f32]> = vectors.iter().map(Vec::as_slice).collect();
-        graph.insert_batch(&refs);
-        graph
+    /// Añade los vectores al fichero (normalizados) y publica.
+    fn append(file: &VectorFile, vectors: &[Vec<f32>]) {
+        let first = file.slots();
+        let rows: Vec<Vec<f32>> = vectors.iter().map(|v| normalized(v)).collect();
+        let refs: Vec<&[f32]> = rows.iter().map(Vec::as_slice).collect();
+        file.write_rows(first, &refs).unwrap();
+        file.publish(first + rows.len()).unwrap();
+    }
+
+    fn build(dir: &Path, vectors: &[Vec<f32>]) -> (Graph, VectorFile) {
+        let file = VectorFile::open(&dir.join("v.dat"), DIM).unwrap();
+        append(&file, vectors);
+        let mut graph = Graph::new(DIM, 12, 80, file.view());
+        graph.extend(file.view());
+        (graph, file)
     }
 
     fn exact(vectors: &[Vec<f32>], query: &[f32], k: usize) -> Vec<u32> {
-        let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let q: Vec<f32> = query.iter().map(|x| x / norm(query)).collect();
+        let q = normalized(query);
         let mut all: Vec<(f32, u32)> = vectors
             .iter()
             .enumerate()
-            .map(|(i, v)| {
-                let n: Vec<f32> = v.iter().map(|x| x / norm(v)).collect();
-                (dist(&q, &n), i as u32)
-            })
+            .map(|(i, v)| (dist(&q, &normalized(v)), i as u32))
             .collect();
         all.sort_by(|a, b| a.0.total_cmp(&b.0));
         all.into_iter().take(k).map(|(_, i)| i).collect()
@@ -824,9 +700,10 @@ mod tests {
 
     #[test]
     fn alcanza_buen_recall_frente_a_fuerza_bruta() {
+        let dir = tempfile::tempdir().unwrap();
         let vectors = rng_vectors(4_000, 20, 7);
         let queries = rng_vectors(60, 20, 99);
-        let graph = build(&vectors);
+        let (graph, _file) = build(dir.path(), &vectors);
         assert_eq!(graph.len(), 4_000);
         let r = recall(&graph, &vectors, &queries, 500);
         assert!(r >= 0.97, "recall {r}");
@@ -835,79 +712,79 @@ mod tests {
     #[test]
     fn la_construccion_es_determinista() {
         let vectors = rng_vectors(1_500, 10, 3);
-        let a = build(&vectors);
-        let b = build(&vectors);
-        let dir = tempfile::tempdir().unwrap();
-        a.write_graph(&dir.path().join("a")).unwrap();
-        b.write_graph(&dir.path().join("b")).unwrap();
+        let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (a, _fa) = build(dir_a.path(), &vectors);
+        let (b, _fb) = build(dir_b.path(), &vectors);
+        a.write_graph(&dir_a.path().join("a.graph")).unwrap();
+        b.write_graph(&dir_b.path().join("b.graph")).unwrap();
         assert_eq!(
-            std::fs::read(dir.path().join("a")).unwrap(),
-            std::fs::read(dir.path().join("b")).unwrap()
+            std::fs::read(dir_a.path().join("a.graph")).unwrap(),
+            std::fs::read(dir_b.path().join("b.graph")).unwrap()
         );
     }
 
     #[test]
     fn insertar_uno_a_uno_tambien_funciona() {
+        let dir = tempfile::tempdir().unwrap();
         let vectors = rng_vectors(800, 8, 5);
         let queries = rng_vectors(40, 8, 11);
-        let mut graph = Graph::new(DIM, 12, 80);
+        let file = VectorFile::open(&dir.path().join("v.dat"), DIM).unwrap();
+        let mut graph = Graph::new(DIM, 12, 80, file.view());
         for vector in &vectors {
-            graph.insert_batch(&[vector.as_slice()]);
+            append(&file, std::slice::from_ref(vector));
+            graph.extend(file.view());
         }
-        let r = recall(&graph, &vectors, &queries, 100);
-        assert!(r >= 0.95, "recall {r}");
+        let r = recall(&graph, &vectors, &queries, 500);
+        assert!(r >= 0.97, "recall {r}");
     }
 
     #[test]
     fn ida_y_vuelta_a_disco_conserva_las_busquedas() {
+        let dir = tempfile::tempdir().unwrap();
         let vectors = rng_vectors(1_200, 10, 21);
         let queries = rng_vectors(20, 10, 33);
-        let graph = build(&vectors);
-        let dir = tempfile::tempdir().unwrap();
-        let (gp, dp) = (dir.path().join("g"), dir.path().join("d"));
+        let (graph, file) = build(dir.path(), &vectors);
+        let gp = dir.path().join("g");
         graph.write_graph(&gp).unwrap();
-        graph.write_vectors(&dp).unwrap();
-        let loaded = Graph::read(&gp, &dp, DIM).expect("carga");
-        assert!(loaded.vectors_clean());
+        let mut loaded = Graph::read(&gp, file.view(), DIM).expect("carga");
         for query in &queries {
             assert_eq!(graph.search(query, 80, 10), loaded.search(query, 80, 10));
         }
+        // Si el fichero tiene otro número de ranuras, no es válido.
+        let short = VectorFile::open(&dir.path().join("corto.dat"), DIM).unwrap();
+        assert!(Graph::read(&gp, short.view(), DIM).is_none());
+
         // Se puede seguir insertando sobre un grafo cargado.
-        let mut loaded = loaded;
         let more = rng_vectors(100, 10, 77);
-        let refs: Vec<&[f32]> = more.iter().map(Vec::as_slice).collect();
-        loaded.insert_batch(&refs);
+        append(&file, &more);
+        loaded.extend(file.view());
         assert_eq!(loaded.len(), 1_300);
-        assert!(!loaded.vectors_clean());
         let hit = loaded.search(&more[5], 80, 1);
         assert_eq!(hit[0].0, 1_205);
     }
 
     #[test]
     fn ficheros_corruptos_no_provocan_panico() {
-        let vectors = rng_vectors(600, 6, 41);
-        let graph = build(&vectors);
         let dir = tempfile::tempdir().unwrap();
-        let (gp, dp) = (dir.path().join("g"), dir.path().join("d"));
+        let vectors = rng_vectors(600, 6, 41);
+        let (graph, file) = build(dir.path(), &vectors);
+        let gp = dir.path().join("g");
         graph.write_graph(&gp).unwrap();
-        graph.write_vectors(&dp).unwrap();
         let good = std::fs::read(&gp).unwrap();
 
         // Truncado y bytes alterados en varias posiciones.
         std::fs::write(&gp, &good[..good.len() / 2]).unwrap();
-        assert!(Graph::read(&gp, &dp, DIM).is_none());
+        assert!(Graph::read(&gp, file.view(), DIM).is_none());
         for position in (0..good.len()).step_by(good.len() / 97 + 1) {
             let mut bad = good.clone();
             bad[position] ^= 0xFF;
             std::fs::write(&gp, &bad).unwrap();
-            if let Some(loaded) = Graph::read(&gp, &dp, DIM) {
+            if let Some(loaded) = Graph::read(&gp, file.view(), DIM) {
                 // Si pasa la validación, buscar no debe entrar en pánico.
                 let _ = loaded.search(&vectors[0], 50, 10);
             }
         }
         std::fs::write(&gp, &good).unwrap();
-        assert!(Graph::read(&gp, &dp, DIM + 1).is_none());
-        std::fs::write(&dp, b"corto").unwrap();
-        assert!(Graph::read(&gp, &dp, DIM).is_none());
+        assert!(Graph::read(&gp, file.view(), DIM + 1).is_none());
     }
 }

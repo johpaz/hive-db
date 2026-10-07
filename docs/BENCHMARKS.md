@@ -29,20 +29,21 @@ realmente en la capa vectorial: **sqlite-vec** y **LanceDB**. Las salidas crudas
 
 | Motor | Ingesta (docs/s) | Vector p50 | Vector p99 | recall@10 | Arranque en frío | Disco | RSS |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **HiveDB** (HNSW, M=24, ef=200) | 8 212 | 0,6 ms | 1,2 ms | 1,00 | 34 ms | 428,7 MiB | 688 MiB |
+| **HiveDB** (HNSW, M=24, ef=200) | 7 815 | 0,6–0,8 ms | 1,2–1,6 ms | 1,00 | 39 ms | 203,9 MiB | 606 MiB |
 | sqlite-vec (exacto) | 109 436 | 65,5 ms | 67,6 ms | 1,00 | 67 ms | 149,4 MiB | 186 MiB |
 | LanceDB flat (exacto) | 76 157 | 162,2 ms | 170,9 ms | 1,00 | 190 ms | 146,7 MiB | 1 512 MiB |
 | LanceDB IVF_HNSW_SQ (defecto) | 11 995 | 1,8 ms | 2,4 ms | 0,51 | 79 ms | 203,2 MiB | 953 MiB |
 
 HiveDB, además, en la misma base: texto (BM25) p50 0,87 ms; híbrido (BM25 + vector + RRF)
-p50 1,5 ms / p99 2,1 ms; cierre limpio 0,13 s; recall idéntico (0,996) tras cerrar y reabrir.
+p50 1,6–1,9 ms / p99 2,7–3,0 ms; cierre limpio 0,05 s; recall idéntico (0,996) tras cerrar y reabrir.
+Desglose del disco: vectores 146,5 MiB, `semantic.redb` 32,6 MiB, grafo 20,5 MiB, índice de texto 4,2 MiB.
 Los parámetros por defecto de LanceDB dan poco recall; ajustado se compara abajo.
 
 ### 10 000 documentos
 
 | Motor | Ingesta (docs/s) | Vector p50 | Vector p99 | recall@10 | Arranque en frío | Disco | RSS |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **HiveDB** (HNSW, M=24, ef=200) | 13 614 | 0,6 ms | 0,9 ms | 1,00 | 3 ms | 49,7 MiB | 101 MiB |
+| **HiveDB** (HNSW, M=24, ef=200) | 14 616 | 0,6 ms | 1,1–1,3 ms | 1,00 | 5 ms | 21,6 MiB | 96 MiB |
 | sqlite-vec (exacto) | 87 075 | 6,7 ms | 8,4 ms | 1,00 | 8 ms | 15,3 MiB | 53 MiB |
 | LanceDB flat (exacto) | 9 885 | 9,5 ms | 15,4 ms | 1,00 | 25 ms | 14,7 MiB | 613 MiB |
 | LanceDB IVF_HNSW_SQ (defecto) | 6 847 | 1,8 ms | 2,7 ms | 0,89 | 10 ms | 20,2 MiB | 359 MiB |
@@ -56,11 +57,11 @@ Los parámetros por defecto de LanceDB dan poco recall; ajustado se compara abaj
 
 | `ef` | recall@10 | Vector p50 | Vector p99 |
 |---:|---:|---:|---:|
-| 50 | 0,87 | 0,37 ms | 0,8 ms |
-| 100 | 0,975 | 0,5 ms | 1,0 ms |
-| **200** (defecto) | 0,996 | 0,63 ms | 1,2 ms |
-| 400 | 0,997 | 0,8 ms | 1,4 ms |
-| 800 | 0,998 | 1,1 ms | 2,1 ms |
+| 50 | 0,87 | 0,4 ms | 1,0 ms |
+| 100 | 0,975 | 0,5 ms | 1,1 ms |
+| **200** (defecto) | 0,996 | 0,6 ms | 1,3 ms |
+| 400 | 0,997 | 1,0 ms | 2,0 ms |
+| 800 | 0,998 | 1,4 ms | 3,0 ms |
 
 ### LanceDB IVF_HNSW_SQ ajustado
 
@@ -76,7 +77,7 @@ Salida cruda en [`benchmarks/lancedb-hnsw-ajuste-100k.txt`](benchmarks/lancedb-h
 
 **A igual recall HiveDB es más rápido en estos datos**: ~0,975 de recall cuesta 0,5 ms (p50) en
 HiveDB y ~2,4 ms en LanceDB (`nprobes`=20, `ef`=100, 0,95); ~0,996 cuesta 0,63 ms frente a
-~3 ms (0,98). La p99 también es menor (1,0–1,2 ms frente a ~2,4–4 ms). Es una sola máquina,
+~3 ms (0,98). La p99 también es menor (1,1–1,3 ms frente a ~2,4–4 ms). Es una sola máquina,
 una sola ejecución y datos sintéticos agrupados: léelo como «sin desventaja de búsqueda», no
 como una garantía general.
 
@@ -115,6 +116,7 @@ anterior):
 | Distancia coseno propia: producto punto en `f32` con 16 acumuladores y vectores normalizados, en vez de `DistCosine` de `anndists` (tres acumuladores `f64` por par, sin vectorizar) | Vector p50 1,95 → 1,3 ms; p99 6,0 → ~4 ms; ingesta 5,1k → 7,4k docs/s |
 | Índice de texto persistido con marcador de generación y sin releer los documentos | Arranque 2,2 s → 0,9–1,3 s |
 | **HNSW propio de almacenamiento plano** (`flat_hnsw`), que sustituye a `hnsw_rs`: arrays `u32` para el grafo, vectores contiguos mapeados con `mmap`, construcción por tandas paralela y determinista | Arranque ~1 s → **34 ms**; vector p50 1,3 → **0,6 ms**; p99 ~4 → **1,2 ms**; recall@10 0,96 → **0,996** a `ef`=200; cierre 0,9 s → 0,13 s; ingesta 7,4k → 8,2k docs/s; disco 495 → 429 MiB; RSS 956 → 688 MiB |
+| **Una sola copia de los vectores**: fichero plano `vectors.N.dat` autoritativo (normalizado), `redb` solo guarda la ranura de cada documento y el grafo lee del mismo fichero mapeado | Disco 429 → **204 MiB**; cierre 0,13 → 0,05 s; RSS 688 → 606 MiB; sin pérdida de recall ni de latencia |
 
 Por qué el motor propio: `hnsw_rs` reconstruye un objeto por vecino al cargar (~0,9 s con
 `mmap` incluido, medido) y guarda cada lista de vecinos tras un `Arc<RwLock<…>>`. El grafo plano
@@ -132,19 +134,19 @@ cuadre, se reconstruye.
 - Búsqueda vectorial aproximada de ~0,6 ms con recall 0,996 a 100k: ~100× más rápida que
   sqlite-vec exacto y ~250× que LanceDB exacto.
 - A igual recall, más rápida que LanceDB IVF_HNSW_SQ ajustado (ver arriba).
-- Arranque en frío de 34 ms a 100k, del orden del de LanceDB (79 ms) y sqlite-vec (67 ms).
+- Arranque en frío de ~40 ms a 100k, del orden del de LanceDB (79 ms) y sqlite-vec (67 ms).
+- Disco de 204 MiB a 100k, igual que LanceDB IVF_HNSW_SQ (203 MiB) y con búsqueda híbrida
+  y log de eventos incluidos.
 - Es el único de los comparados que da **búsqueda híbrida (BM25 + vector + RRF) en el mismo
   motor** (1,5 ms p50 a 100k), además del log de eventos, las proyecciones y el consent graph.
 
 **En contra, sin maquillar**
-- **Disco: 429 MiB** frente a 147–203 MiB. Los vectores están dos veces: en los documentos
-  de redb (160 MiB útiles y ~93 MiB perdidos por el empaquetado de páginas de redb con
-  valores de ~1,6 KB) y en el fichero de vectores del índice (154 MiB). Es lo siguiente a
-  atacar: dejar una única copia plana.
+- **Disco: 204 MiB** frente a 147–149 MiB de sqlite-vec y LanceDB exacto (~1,4×). HiveDB
+  guarda además el texto de los documentos, el índice BM25 y el grafo (20 MiB).
 - **Ingesta: ~8k docs/s a 100k**, por debajo de sqlite-vec (109k) y LanceDB (12k–76k). No es
   una comparación limpia: HiveDB indexa texto (BM25), mantiene el log inmutable y construye
   HNSW al insertar; los otros comparadores solo guardan el vector.
-- **RSS: 688 MiB** frente a 186–1 512 MiB (depende del motor).
+- **RSS: ~600 MiB** frente a 186–1 512 MiB (depende del motor).
 - sqlite-vec y LanceDB flat son exactos (recall 1,0 por construcción): no son comparables
   en recall, solo en latencia.
 - Datos sintéticos agrupados: el recall con embeddings reales puede diferir.
@@ -189,4 +191,4 @@ corpus grandes conviene aportar los vectores.
 
 - Repetir con embeddings reales de un corpus público es/en.
 - Medir Turso con vectores.
-- Reducir el disco dejando una única copia de los vectores (ver «En contra»).
+- Más opciones de disco: vectores `f16` opcionales (la mitad, con precisión reducida).

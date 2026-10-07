@@ -327,7 +327,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Ok(entradas) = std::fs::read_dir(dir.path()) {
         for e in entradas.flatten() {
-            let mib = tamano_dir(&e.path()) as f64 / 1_048_576.0;
+            let bytes = if e.path().is_dir() {
+                tamano_dir(&e.path())
+            } else {
+                e.metadata().map_or(0, |m| m.len())
+            };
+            let mib = bytes as f64 / 1_048_576.0;
             println!("disco_detalle {}={mib:.1}", e.file_name().to_string_lossy());
         }
     }

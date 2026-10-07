@@ -32,3 +32,7 @@ path = "tests/g11_semantic_integrity.rs"
 [[test]]
 name = "g11c_graph_persistence"
 path = "tests/g11c_graph_persistence.rs"
+
+[[test]]
+name = "g11d_vector_file"
+path = "tests/g11d_vector_file.rs"

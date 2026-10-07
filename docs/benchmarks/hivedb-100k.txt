@@ -1,21 +1,22 @@
-ef=50 recall_at_10=0.8731 vector_p50_us=366 vector_p99_us=791
-ef=100 recall_at_10=0.9750 vector_p50_us=496 vector_p99_us=996
-ef=200 recall_at_10=0.9958 vector_p50_us=634 vector_p99_us=1171
-ef=400 recall_at_10=0.9971 vector_p50_us=789 vector_p99_us=1359
-ef=800 recall_at_10=0.9979 vector_p50_us=1092 vector_p99_us=2079
+ef=50 recall_at_10=0.8731 vector_p50_us=419 vector_p99_us=958
+ef=100 recall_at_10=0.9750 vector_p50_us=484 vector_p99_us=1075
+ef=200 recall_at_10=0.9958 vector_p50_us=608 vector_p99_us=1273
+ef=400 recall_at_10=0.9971 vector_p50_us=1023 vector_p99_us=2021
+ef=800 recall_at_10=0.9979 vector_p50_us=1427 vector_p99_us=3030
 disco_detalle fts.generation=0.0
-disco_detalle hnsw=167.0
-disco_detalle semantic.redb=0.0
+disco_detalle hnsw=20.5
+disco_detalle vectors.0.dat=146.5
+disco_detalle semantic.redb=32.6
 disco_detalle fts=4.2
 disco_detalle meta.json=0.0
 # hivedb-bench docs=100000 consultas=1000 dim=384 k=10
-ingesta_docs_por_s=8212
-vector_p50_us=604 vector_p99_us=1191
-texto_p50_us=848 texto_p99_us=1006
-hibrida_p50_us=1472 hibrida_p99_us=2069
+ingesta_docs_por_s=7815
+vector_p50_us=761 vector_p99_us=1639
+texto_p50_us=950 texto_p99_us=1163
+hibrida_p50_us=1943 hibrida_p99_us=3038
 recall_at_10=0.9958
 recall_at_10_tras_reabrir=0.9958
-arranque_en_frio_ms=34 vectores_vivos=100000
-cierre_ms=129
-disco_mib=428.7
-rss_mib=688.2
+arranque_en_frio_ms=39 vectores_vivos=100000
+cierre_ms=53
+disco_mib=203.9
+rss_mib=605.5

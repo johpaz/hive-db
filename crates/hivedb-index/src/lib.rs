@@ -8,6 +8,7 @@ pub mod index;
 pub mod rrf;
 pub mod text;
 pub mod types;
+mod vector_file;
 
 pub use embed::{EmbedKind, Embedder};
 pub use hnsw::{DEFAULT_EF_SEARCH, VectorIndex};

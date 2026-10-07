@@ -167,9 +167,48 @@ El `meta.json` de 0.3.x sólo tenía `{"vector_dimension": N}`. Al abrir una bas
 
 ### Persistencia, reconstrucción y compactación
 
-`semantic.redb` es la fuente de verdad de cada `IndexDoc` completo. Tantivy y HNSW son índices derivados: al abrir se reconstruyen desde documentos vivos, por lo que una reapertura nunca depende de un log vectorial parcialmente actualizado. Las mutaciones están serializadas por un `RwLock` de operación y aumentan una generación dentro de la misma transacción `redb`.
+Qué es autoritativo y qué es derivado:
 
-HNSW conserva tombstones solo en RAM. Se reconstruye automáticamente cuando hay al menos 1.024 tombstones y representan 25% de los nodos, o manualmente mediante `compact_index()` / `compactIndex()`.
+| Fichero | Contenido | Naturaleza |
+|---|---|---|
+| `semantic.redb` | cada `IndexDoc` **sin vector** más la ranura (`slot`) de su vector; generación; ranuras confirmadas; cuál de los dos ficheros de vectores está activo | autoritativo |
+| `vectors.0.dat` / `vectors.1.dat` | los vectores, normalizados (L2), en `f32` little-endian, contiguos; cabecera de 16 bytes y una fila por ranura | autoritativo (solo uno está activo) |
+| `fts/`, `fts.generation` | índice BM25 de Tantivy y la generación con la que se cerró limpiamente | derivado |
+| `hnsw/` (`vectors.hnsw.graph`, `vectors.meta`) | grafo HNSW y el mapa ranura → id | derivado |
+
+Los vectores se guardan **una sola vez**. El grafo no los copia: lee del mismo fichero mapeado en
+memoria, y el id de cada nodo es su número de ranura. Se normalizan al escribirlos (la métrica es
+coseno), por lo que no se conserva la magnitud original; ninguna API devuelve el vector guardado.
+
+**Escritura de una tanda:** (1) las filas nuevas se escriben al final del fichero y se hace `fsync`,
+(2) se confirma la transacción de `redb` que referencia las ranuras y sube la generación, (3) se
+publica la nueva vista de lectura y se enlazan los nodos. Si el proceso muere entre (1) y (2) quedan
+filas huérfanas: al abrir se descartan recortando el fichero a las ranuras confirmadas en `redb`.
+Que el fichero tenga menos filas de las confirmadas es corrupción y la apertura falla con un error.
+
+**Actualizar o borrar un documento** deja su ranura muerta (un tombstone en el grafo). Con al menos
+1.024 ranuras muertas que sean el 25% o más, o al llamar a `compact_index()` / `compactIndex()`, se
+reescribe el vector en el fichero **alterno** (sin ranuras muertas) y una sola transacción de `redb`
+renumera las ranuras y cambia el fichero activo; el grafo se reconstruye. Sin `rename` sobre ficheros
+mapeados, y un fallo antes de confirmar deja el fichero activo intacto (el otro se borra al abrir).
+
+**Apertura:** si el cierre anterior dejó el índice de texto y el grafo al día con la generación, no se
+lee ningún documento (arranque de decenas de milisegundos con 100k vectores). Si algo no cuadra
+—marcador ausente, generación distinta, recuento de documentos o de vectores vivos— se reconstruye lo
+derivado desde `semantic.redb` y los vectores. Las mutaciones están serializadas por un `RwLock` de
+operación y aumentan una generación dentro de la misma transacción `redb`.
+
+#### Migración desde el formato anterior
+
+Hasta la versión anterior el vector iba serializado dentro del registro del documento en la tabla
+`semantic_docs`. Al abrir una base así, `SemanticStore::open` mueve los documentos por tandas de 2.000
+a la tabla nueva (`semantic_docs_v2`) y sus vectores al fichero plano, cada tanda en una sola
+transacción; si se interrumpe, la siguiente apertura continúa donde quedó. Al terminar se compacta
+`semantic.redb`. `meta.json` **no se modifica** (el esquema sigue siendo 2).
+
+Para que una versión anterior no pueda abrir la base migrada y ver un índice vacío, `semantic_docs`
+se recrea vacía con claves `u64`: abrirla con claves `&str` falla con un error de tipo. No hay vuelta
+atrás automática; para volver a una versión anterior hay que reindexar.
 
 El benchmark reproducible del gate se ejecuta con:
 

@@ -2,16 +2,30 @@ use crate::hnsw::{MAX_VECTOR_DIMENSION, VectorIndex, cosine_similarity, validate
 use crate::rrf::rrf;
 use crate::text::TextIndex;
 use crate::types::{Fusion, Hit, HybridQuery, IndexDoc, ScalarFilter, VectorConfig};
+use crate::vector_file::{VectorFile, View, normalized};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
-const DOCS: TableDefinition<&str, Vec<u8>> = TableDefinition::new("semantic_docs");
+/// Documentos con el vector dentro del registro (formato anterior a 0.6); solo se
+/// lee para migrarlos.
+const DOCS_V1: TableDefinition<&str, Vec<u8>> = TableDefinition::new("semantic_docs");
+/// Tras migrar, `semantic_docs` se recrea con claves `u64` (vacía): una versión
+/// anterior, que la abre con claves `&str`, falla con un error de tipo en vez de
+/// ver un índice vacío y escribir en él. `meta.json` no se toca (las bases de
+/// versiones anteriores no deben verse alteradas).
+const DOCS_V1_TRIPWIRE: TableDefinition<u64, u64> = TableDefinition::new("semantic_docs");
+/// Documentos sin vector, con la ranura del fichero plano.
+const DOCS: TableDefinition<&str, Vec<u8>> = TableDefinition::new("semantic_docs_v2");
 const META: TableDefinition<&str, u64> = TableDefinition::new("semantic_meta");
 const GENERATION_KEY: &str = "generation";
+/// Ranuras del fichero de vectores confirmadas en redb.
+const VECTOR_SLOTS_KEY: &str = "vector_slots";
+/// Cuál de los dos ficheros alternos de vectores (0 o 1) está activo.
+const VECTOR_FILE_KEY: &str = "vector_file";
 const STORE_FILE: &str = "semantic.redb";
 const DATABASE_META_FILE: &str = "meta.json";
 const GRAPH_DIR: &str = "hnsw";
@@ -40,12 +54,36 @@ impl DatabaseMeta {
     }
 }
 
+/// Documento tal como se guarda en redb: sin el vector, que vive en el fichero
+/// plano (`vector_file`) y se referencia por su ranura.
+#[derive(Serialize, Deserialize)]
+struct StoredDoc {
+    /// Siempre con `vector: None`.
+    doc: IndexDoc,
+    slot: Option<u64>,
+}
+
+/// Tanda máxima que se migra del formato antiguo por transacción.
+const MIGRATION_BATCH: usize = 2_000;
+
 struct SemanticStore {
     db: Database,
+    base: PathBuf,
+    dim: Option<usize>,
+    /// Fichero de vectores activo; `None` si la base no tiene espacio vectorial.
+    vectors: RwLock<Option<Arc<VectorFile>>>,
+}
+
+fn vector_file_path(base: &Path, index: u64) -> PathBuf {
+    base.join(format!("vectors.{index}.dat"))
+}
+
+fn io_error(error: std::io::Error) -> crate::IndexError {
+    crate::IndexError::Storage(format!("vector file: {error}"))
 }
 
 impl SemanticStore {
-    fn open(base: &Path) -> crate::Result<Self> {
+    fn open(base: &Path, dim: Option<usize>) -> crate::Result<Self> {
         let db = Database::create(base.join(STORE_FILE)).map_err(storage_error)?;
         let txn = db.begin_write().map_err(storage_error)?;
         {
@@ -53,17 +91,166 @@ impl SemanticStore {
             txn.open_table(META).map_err(storage_error)?;
         }
         txn.commit().map_err(storage_error)?;
-        Ok(Self { db })
+
+        let mut store = Self {
+            db,
+            base: base.to_path_buf(),
+            dim,
+            vectors: RwLock::new(None),
+        };
+        store.open_vector_file()?;
+        store.migrate_legacy_docs()?;
+        Ok(store)
     }
 
-    fn generation(&self) -> crate::Result<u64> {
+    fn meta_u64(&self, key: &str) -> crate::Result<u64> {
         let txn = self.db.begin_read().map_err(storage_error)?;
         let meta = txn.open_table(META).map_err(storage_error)?;
         Ok(meta
-            .get(GENERATION_KEY)
+            .get(key)
             .map_err(storage_error)?
             .map(|value| value.value())
             .unwrap_or(0))
+    }
+
+    /// Abre el fichero de vectores activo y lo concilia con lo confirmado en
+    /// redb: las filas huérfanas de una tanda que no llegó a confirmarse se
+    /// descartan; que falten filas confirmadas es corrupción.
+    fn open_vector_file(&mut self) -> crate::Result<()> {
+        let Some(dim) = self.dim else {
+            return Ok(());
+        };
+        let active = self.meta_u64(VECTOR_FILE_KEY)?;
+        let committed = self.meta_u64(VECTOR_SLOTS_KEY)? as usize;
+        let file =
+            VectorFile::open(&vector_file_path(&self.base, active), dim).map_err(io_error)?;
+        match file.slots().cmp(&committed) {
+            std::cmp::Ordering::Greater => file.truncate_to(committed).map_err(io_error)?,
+            std::cmp::Ordering::Less => {
+                return Err(crate::IndexError::Storage(format!(
+                    "vector file has {} slots but the store references {committed}: \
+                     the file is damaged or incomplete",
+                    file.slots()
+                )));
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+        // El otro fichero es un resto de una compactación que no se confirmó
+        // (o el de antes de una que sí).
+        let _ = std::fs::remove_file(vector_file_path(&self.base, 1 - active.min(1)));
+        *self.vectors.write().unwrap() = Some(Arc::new(file));
+        Ok(())
+    }
+
+    fn vector_file(&self) -> Option<Arc<VectorFile>> {
+        self.vectors.read().unwrap().clone()
+    }
+
+    /// Vista de los vectores publicados; `None` si la base no tiene vectores.
+    fn view(&self) -> Option<Arc<View>> {
+        self.vector_file().map(|file| file.view())
+    }
+
+    /// Pasa los documentos del formato anterior (vector dentro del registro de
+    /// redb) al actual (vector en el fichero plano). Reanudable: cada tanda
+    /// mueve sus documentos y sus vectores en una sola transacción.
+    fn migrate_legacy_docs(&mut self) -> crate::Result<()> {
+        enum Legacy {
+            /// No hay tabla antigua ni señal de migración (base nueva).
+            Missing,
+            /// Tabla antigua con este número de documentos.
+            Present(u64),
+            /// Ya migrada: la tabla es la señal incompatible.
+            Migrated,
+        }
+        let legacy = {
+            let txn = self.db.begin_read().map_err(storage_error)?;
+            match txn.open_table(DOCS_V1) {
+                Ok(table) => Legacy::Present(table.len().map_err(storage_error)?),
+                Err(redb::TableError::TableDoesNotExist(_)) => Legacy::Missing,
+                Err(redb::TableError::TableTypeMismatch { .. }) => Legacy::Migrated,
+                Err(error) => return Err(storage_error(error)),
+            }
+        };
+        let pending = match legacy {
+            Legacy::Migrated => return Ok(()),
+            Legacy::Missing => 0,
+            Legacy::Present(count) => count,
+        };
+        let mut remaining = pending;
+        while remaining > 0 {
+            let batch: Vec<(String, IndexDoc)> = {
+                let txn = self.db.begin_read().map_err(storage_error)?;
+                let table = txn.open_table(DOCS_V1).map_err(storage_error)?;
+                let mut batch = Vec::new();
+                for entry in table.iter().map_err(storage_error)?.take(MIGRATION_BATCH) {
+                    let (key, value) = entry.map_err(storage_error)?;
+                    batch.push((
+                        key.value().to_string(),
+                        bincode::deserialize(&value.value())?,
+                    ));
+                }
+                batch
+            };
+            if batch.is_empty() {
+                break;
+            }
+            let file = self.vector_file();
+            let first = file.as_ref().map_or(0, |f| f.slots());
+            let rows: Vec<Vec<f32>> = batch
+                .iter()
+                .filter_map(|(_, doc)| doc.vector.as_deref().map(normalized))
+                .collect();
+            if !rows.is_empty() {
+                let file = file
+                    .as_ref()
+                    .ok_or(crate::IndexError::VectorIndexDisabled)?;
+                if rows.iter().any(|row| Some(row.len()) != self.dim) {
+                    return Err(crate::IndexError::Storage(
+                        "legacy document vector has a different dimension".into(),
+                    ));
+                }
+                let refs: Vec<&[f32]> = rows.iter().map(Vec::as_slice).collect();
+                file.write_rows(first, &refs).map_err(io_error)?;
+            }
+            let txn = self.db.begin_write().map_err(storage_error)?;
+            {
+                let mut legacy = txn.open_table(DOCS_V1).map_err(storage_error)?;
+                let mut docs = txn.open_table(DOCS).map_err(storage_error)?;
+                let mut next = first as u64;
+                for (key, mut doc) in batch.into_iter() {
+                    let slot = doc.vector.take().map(|_| {
+                        next += 1;
+                        next - 1
+                    });
+                    docs.insert(key.as_str(), bincode::serialize(&StoredDoc { doc, slot })?)
+                        .map_err(storage_error)?;
+                    legacy.remove(key.as_str()).map_err(storage_error)?;
+                    remaining = remaining.saturating_sub(1);
+                }
+                let mut meta = txn.open_table(META).map_err(storage_error)?;
+                meta.insert(VECTOR_SLOTS_KEY, next).map_err(storage_error)?;
+            }
+            txn.commit().map_err(storage_error)?;
+            if let Some(file) = file {
+                file.publish(first + rows.len()).map_err(io_error)?;
+            }
+        }
+        let txn = self.db.begin_write().map_err(storage_error)?;
+        if matches!(legacy, Legacy::Present(_)) {
+            txn.delete_table(DOCS_V1).map_err(storage_error)?;
+        }
+        txn.open_table(DOCS_V1_TRIPWIRE).map_err(storage_error)?;
+        txn.commit().map_err(storage_error)?;
+        if pending > 0 {
+            // El fichero de redb no se encoge solo al vaciar una tabla.
+            self.db.compact().map_err(storage_error)?;
+        }
+        Ok(())
+    }
+
+    fn generation(&self) -> crate::Result<u64> {
+        self.meta_u64(GENERATION_KEY)
     }
 
     fn doc_count(&self) -> crate::Result<u64> {
@@ -72,7 +259,7 @@ impl SemanticStore {
         docs.len().map_err(storage_error)
     }
 
-    fn load_all(&self) -> crate::Result<Vec<IndexDoc>> {
+    fn load_all(&self) -> crate::Result<Vec<StoredDoc>> {
         let txn = self.db.begin_read().map_err(storage_error)?;
         let docs = txn.open_table(DOCS).map_err(storage_error)?;
         let mut loaded = Vec::new();
@@ -83,41 +270,95 @@ impl SemanticStore {
         Ok(loaded)
     }
 
-    fn load_ids(&self, ids: &[String]) -> crate::Result<Vec<IndexDoc>> {
+    /// Ranura → documento vivo que la usa (o `None` si está muerta), para
+    /// reconstruir el grafo.
+    fn slot_ids(&self, docs: &[StoredDoc]) -> crate::Result<Vec<Option<String>>> {
+        let slots = self.view().map_or(0, |view| view.slots());
+        let mut ids = vec![None; slots];
+        for stored in docs {
+            if let Some(slot) = stored.slot {
+                let entry = ids.get_mut(slot as usize).ok_or_else(|| {
+                    crate::IndexError::Storage(format!(
+                        "document {} references slot {slot} beyond the vector file",
+                        stored.doc.id
+                    ))
+                })?;
+                *entry = Some(stored.doc.id.clone());
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Vectores (normalizados) de los documentos dados que tengan uno.
+    fn load_vectors(&self, ids: &[String]) -> crate::Result<Vec<(String, Vec<f32>)>> {
+        let Some(view) = self.view() else {
+            return Ok(Vec::new());
+        };
         let txn = self.db.begin_read().map_err(storage_error)?;
         let docs = txn.open_table(DOCS).map_err(storage_error)?;
         let mut loaded = Vec::with_capacity(ids.len());
         for id in ids {
-            if let Some(value) = docs.get(id.as_str()).map_err(storage_error)? {
-                loaded.push(bincode::deserialize(&value.value())?);
+            let Some(value) = docs.get(id.as_str()).map_err(storage_error)? else {
+                continue;
+            };
+            let stored: StoredDoc = bincode::deserialize(&value.value())?;
+            if let Some(slot) = stored.slot {
+                let vector = view.try_get(slot as usize).ok_or_else(|| {
+                    crate::IndexError::Storage(format!(
+                        "document {id} references slot {slot} beyond the vector file"
+                    ))
+                })?;
+                loaded.push((stored.doc.id, vector.to_vec()));
             }
         }
         Ok(loaded)
     }
 
-    fn upsert_batch(&self, documents: &[IndexDoc]) -> crate::Result<u64> {
+    /// Guarda la tanda. Devuelve la generación y la vista de vectores tras
+    /// publicar las ranuras nuevas.
+    fn upsert_batch(&self, documents: &[IndexDoc]) -> crate::Result<(u64, Option<Arc<View>>)> {
+        let file = self.vector_file();
+        let rows: Vec<Vec<f32>> = documents
+            .iter()
+            .filter_map(|doc| doc.vector.as_deref().map(normalized))
+            .collect();
+        let first = file.as_ref().map_or(0, |f| f.slots());
+        if !rows.is_empty() {
+            let file = file
+                .as_ref()
+                .ok_or(crate::IndexError::VectorIndexDisabled)?;
+            let refs: Vec<&[f32]> = rows.iter().map(Vec::as_slice).collect();
+            // Primero los vectores, sincronizados; después la transacción que
+            // los referencia (ver `vector_file`).
+            file.write_rows(first, &refs).map_err(io_error)?;
+        }
+
         let txn = self.db.begin_write().map_err(storage_error)?;
         let generation;
         {
             let mut docs = txn.open_table(DOCS).map_err(storage_error)?;
+            let mut next = first as u64;
             for doc in documents {
-                let encoded = bincode::serialize(doc)?;
-                docs.insert(doc.id.as_str(), encoded)
-                    .map_err(storage_error)?;
+                let mut doc = doc.clone();
+                let slot = doc.vector.take().map(|_| {
+                    next += 1;
+                    next - 1
+                });
+                let id = doc.id.clone();
+                let encoded = bincode::serialize(&StoredDoc { doc, slot })?;
+                docs.insert(id.as_str(), encoded).map_err(storage_error)?;
             }
             let mut meta = txn.open_table(META).map_err(storage_error)?;
-            generation = meta
-                .get(GENERATION_KEY)
-                .map_err(storage_error)?
-                .map(|value| value.value())
-                .unwrap_or(0)
-                .checked_add(1)
-                .ok_or_else(|| crate::IndexError::Storage("semantic generation overflow".into()))?;
-            meta.insert(GENERATION_KEY, generation)
-                .map_err(storage_error)?;
+            if !rows.is_empty() {
+                meta.insert(VECTOR_SLOTS_KEY, next).map_err(storage_error)?;
+            }
+            generation = next_generation(&mut meta)?;
         }
         txn.commit().map_err(storage_error)?;
-        Ok(generation)
+        if let Some(file) = file.as_ref() {
+            file.publish(first + rows.len()).map_err(io_error)?;
+        }
+        Ok((generation, file.map(|f| f.view())))
     }
 
     fn delete_ids(&self, ids: &[String]) -> crate::Result<u64> {
@@ -135,17 +376,122 @@ impl SemanticStore {
         Ok(generation)
     }
 
-    fn clear(&self) -> crate::Result<u64> {
-        let txn = self.db.begin_write().map_err(storage_error)?;
-        let generation;
-        {
-            let mut docs = txn.open_table(DOCS).map_err(storage_error)?;
-            docs.retain(|_, _| false).map_err(storage_error)?;
-            let mut meta = txn.open_table(META).map_err(storage_error)?;
-            generation = next_generation(&mut meta)?;
+    /// Cambia el fichero de vectores activo por `replacement` (ya sincronizado)
+    /// en la misma transacción que `apply` modifica los documentos. Si la
+    /// transacción no se confirma, el fichero nuevo se borra.
+    fn switch_vector_file<F>(
+        &self,
+        replacement: VectorFile,
+        new_index: u64,
+        apply: F,
+    ) -> crate::Result<u64>
+    where
+        F: FnOnce(&mut redb::Table<'_, &str, Vec<u8>>) -> crate::Result<()>,
+    {
+        let committed = (|| -> crate::Result<u64> {
+            let txn = self.db.begin_write().map_err(storage_error)?;
+            let generation;
+            {
+                let mut docs = txn.open_table(DOCS).map_err(storage_error)?;
+                apply(&mut docs)?;
+                let mut meta = txn.open_table(META).map_err(storage_error)?;
+                meta.insert(VECTOR_SLOTS_KEY, replacement.slots() as u64)
+                    .map_err(storage_error)?;
+                meta.insert(VECTOR_FILE_KEY, new_index)
+                    .map_err(storage_error)?;
+                generation = next_generation(&mut meta)?;
+            }
+            txn.commit().map_err(storage_error)?;
+            Ok(generation)
+        })();
+        let generation = match committed {
+            Ok(generation) => generation,
+            Err(error) => {
+                let _ = std::fs::remove_file(replacement.path());
+                return Err(error);
+            }
+        };
+        let old = self.vectors.write().unwrap().replace(Arc::new(replacement));
+        if let Some(old) = old {
+            // Mejor esfuerzo: si no se puede borrar (p. ej. aún mapeado en
+            // Windows), la próxima apertura lo elimina.
+            let _ = std::fs::remove_file(old.path());
         }
-        txn.commit().map_err(storage_error)?;
         Ok(generation)
+    }
+
+    fn clear(&self) -> crate::Result<u64> {
+        let Some(dim) = self.dim else {
+            let txn = self.db.begin_write().map_err(storage_error)?;
+            let generation;
+            {
+                let mut docs = txn.open_table(DOCS).map_err(storage_error)?;
+                docs.retain(|_, _| false).map_err(storage_error)?;
+                let mut meta = txn.open_table(META).map_err(storage_error)?;
+                generation = next_generation(&mut meta)?;
+            }
+            txn.commit().map_err(storage_error)?;
+            return Ok(generation);
+        };
+        let new_index = 1 - self.meta_u64(VECTOR_FILE_KEY)?.min(1);
+        let replacement = VectorFile::create_with(
+            &vector_file_path(&self.base, new_index),
+            dim,
+            std::iter::empty(),
+        )
+        .map_err(io_error)?;
+        self.switch_vector_file(replacement, new_index, |docs| {
+            docs.retain(|_, _| false).map_err(storage_error)?;
+            Ok(())
+        })
+    }
+
+    /// Reescribe el fichero de vectores sin las ranuras muertas (documentos
+    /// actualizados o borrados). Devuelve la nueva generación, o `None` si no
+    /// había nada que compactar. Los números de ranura cambian, así que el grafo
+    /// debe reconstruirse después.
+    fn compact_vectors(&self) -> crate::Result<Option<u64>> {
+        let (Some(dim), Some(file)) = (self.dim, self.vector_file()) else {
+            return Ok(None);
+        };
+        let docs = self.load_all()?;
+        let live = docs.iter().filter(|d| d.slot.is_some()).count();
+        if live == file.slots() {
+            return Ok(None);
+        }
+        let view = file.view();
+        let new_index = 1 - self.meta_u64(VECTOR_FILE_KEY)?.min(1);
+        let mut rows: Vec<&[f32]> = Vec::with_capacity(live);
+        for stored in &docs {
+            if let Some(slot) = stored.slot {
+                rows.push(view.try_get(slot as usize).ok_or_else(|| {
+                    crate::IndexError::Storage(format!(
+                        "document {} references slot {slot} beyond the vector file",
+                        stored.doc.id
+                    ))
+                })?);
+            }
+        }
+        let replacement =
+            VectorFile::create_with(&vector_file_path(&self.base, new_index), dim, rows)
+                .map_err(io_error)?;
+        let generation = self.switch_vector_file(replacement, new_index, |table| {
+            let mut next = 0u64;
+            for stored in docs {
+                let slot = stored.slot.map(|_| {
+                    next += 1;
+                    next - 1
+                });
+                let id = stored.doc.id.clone();
+                let encoded = bincode::serialize(&StoredDoc {
+                    doc: stored.doc,
+                    slot,
+                })?;
+                table.insert(id.as_str(), encoded).map_err(storage_error)?;
+            }
+            Ok(())
+        })?;
+        Ok(Some(generation))
     }
 }
 
@@ -209,9 +555,11 @@ impl SemanticIndex {
 
         let fts_dir = base.join("fts");
         std::fs::create_dir_all(&fts_dir)?;
-        let store = SemanticStore::open(base)?;
+        let store = SemanticStore::open(base, vector_config.as_ref().map(|c| c.dimension))?;
         let generation = store.generation()?;
         let graph_dir = base.join(GRAPH_DIR);
+        // Restos de versiones anteriores, que guardaban aquí los vectores.
+        let _ = std::fs::remove_file(graph_dir.join("vectors.hnsw.data"));
 
         // Camino rápido: si el cierre anterior dejó el índice de texto y el
         // grafo ANN al día con esta generación, no hace falta leer ni un
@@ -222,22 +570,28 @@ impl SemanticIndex {
         let _ = std::fs::remove_file(&fts_marker);
         let text = TextIndex::open(fts_dir)?;
         let fts_ready = marked == Some(generation) && text.num_docs()? == store.doc_count()?;
-        let mut loaded = vector_config.as_ref().and_then(|config| {
-            VectorIndex::load(&graph_dir, config.dimension, generation, &config.space_id)
-        });
+        let mut loaded = match (vector_config.as_ref(), store.view()) {
+            (Some(config), Some(view)) => VectorIndex::load(
+                &graph_dir,
+                config.dimension,
+                generation,
+                &config.space_id,
+                view,
+            ),
+            _ => None,
+        };
 
         let documents = if fts_ready && (loaded.is_some() || vector_config.is_none()) {
             None
         } else {
             let documents = store.load_all()?;
-            validate_documents(&documents, vector_config.as_ref())?;
             if !fts_ready {
                 text.clear()?;
-                text.upsert_batch(&documents)?;
+                text.upsert_batch(&documents.iter().map(|d| d.doc.clone()).collect::<Vec<_>>())?;
             }
             // Defensa extra: el grafo restaurado debe tener tantos vectores
             // vivos como documentos con vector.
-            let expected_live = documents.iter().filter(|doc| doc.vector.is_some()).count();
+            let expected_live = documents.iter().filter(|d| d.slot.is_some()).count();
             if loaded
                 .as_ref()
                 .is_some_and(|index| index.stats().0 != expected_live)
@@ -249,7 +603,9 @@ impl SemanticIndex {
         let graph_saved = loaded.is_some();
         let vector = match (loaded, documents) {
             (Some(index), _) => Some(index),
-            (None, Some(documents)) => build_vector_index(vector_config.as_ref(), &documents)?,
+            (None, Some(documents)) => {
+                build_vector_index(vector_config.as_ref(), &store, &documents)?
+            }
             (None, None) => None,
         };
 
@@ -301,11 +657,11 @@ impl SemanticIndex {
             return Ok(());
         }
         let mut state = self.state.write().unwrap();
-        let generation = self.store.upsert_batch(docs)?;
+        let (generation, view) = self.store.upsert_batch(docs)?;
         let update = state
             .text
             .upsert_batch(docs)
-            .and_then(|()| sync_vectors(state.vector.as_ref(), docs));
+            .and_then(|()| sync_vectors(state.vector.as_ref(), view, docs));
         self.finish_update(&mut state, generation, update)
     }
 
@@ -343,18 +699,18 @@ impl SemanticIndex {
     pub fn clear(&self) -> crate::Result<()> {
         let mut state = self.state.write().unwrap();
         let generation = self.store.clear()?;
-        let update = state
-            .text
-            .clear()
-            .and_then(|()| match state.vector.as_ref() {
-                Some(vector) => vector.clear(),
-                None => Ok(()),
-            });
+        let update = state.text.clear().map(|()| {
+            // El almacén ya cambió a un fichero de vectores vacío.
+            if let (Some(config), Some(view)) = (self.vector_config.as_ref(), self.store.view()) {
+                state.vector = Some(VectorIndex::new(config.dimension, view));
+            }
+        });
         self.finish_update(&mut state, generation, update)
     }
 
     pub fn compact(&self) -> crate::Result<()> {
         let mut state = self.state.write().unwrap();
+        self.store.compact_vectors()?;
         self.rebuild_state(&mut state)
     }
 
@@ -412,12 +768,13 @@ impl SemanticIndex {
         k: usize,
     ) -> crate::Result<Vec<(String, usize, f32)>> {
         let ids = text.ids_by_filters(filters)?;
-        let documents = self.store.load_ids(&ids)?;
-        let mut scores: Vec<(String, f32)> = documents
+        let mut scores: Vec<(String, f32)> = self
+            .store
+            .load_vectors(&ids)?
             .into_iter()
-            .filter_map(|doc| {
-                doc.vector
-                    .map(|vector| (doc.id, cosine_similarity(query, &vector)))
+            .map(|(id, vector)| {
+                let score = cosine_similarity(query, &vector);
+                (id, score)
             })
             .collect();
         scores.sort_by(|left, right| {
@@ -458,7 +815,12 @@ impl SemanticIndex {
             .as_ref()
             .is_some_and(VectorIndex::should_compact)
         {
-            self.rebuild_vector(state)?;
+            // Compactar es un mantenimiento: si falla, los vectores muertos
+            // simplemente siguen ocupando sitio hasta el próximo intento.
+            if let Ok(Some(compacted)) = self.store.compact_vectors() {
+                state.generation = compacted;
+                self.rebuild_vector(state)?;
+            }
         }
         Ok(())
     }
@@ -478,10 +840,11 @@ impl SemanticIndex {
     fn rebuild_state(&self, state: &mut DerivedState) -> crate::Result<()> {
         self.graph_saved.store(false, Ordering::Release);
         let documents = self.store.load_all()?;
-        validate_documents(&documents, self.vector_config.as_ref())?;
         state.text.clear()?;
-        state.text.upsert_batch(&documents)?;
-        state.vector = build_vector_index(self.vector_config.as_ref(), &documents)?;
+        state
+            .text
+            .upsert_batch(&documents.iter().map(|d| d.doc.clone()).collect::<Vec<_>>())?;
+        state.vector = build_vector_index(self.vector_config.as_ref(), &self.store, &documents)?;
         state.generation = self.store.generation()?;
         Ok(())
     }
@@ -489,7 +852,7 @@ impl SemanticIndex {
     fn rebuild_vector(&self, state: &mut DerivedState) -> crate::Result<()> {
         self.graph_saved.store(false, Ordering::Release);
         let documents = self.store.load_all()?;
-        state.vector = build_vector_index(self.vector_config.as_ref(), &documents)?;
+        state.vector = build_vector_index(self.vector_config.as_ref(), &self.store, &documents)?;
         Ok(())
     }
 
@@ -621,52 +984,49 @@ fn corrupt_meta(cause: impl std::fmt::Display) -> crate::IndexError {
 
 fn build_vector_index(
     config: Option<&VectorConfig>,
-    documents: &[IndexDoc],
+    store: &SemanticStore,
+    documents: &[StoredDoc],
 ) -> crate::Result<Option<VectorIndex>> {
-    let Some(config) = config else {
+    let (Some(config), Some(view)) = (config, store.view()) else {
         return Ok(None);
     };
-    let index = VectorIndex::new(config.dimension);
-    let vectors: Vec<(&str, &[f32])> = documents
-        .iter()
-        .filter_map(|doc| {
-            doc.vector
-                .as_deref()
-                .map(|vector| (doc.id.as_str(), vector))
-        })
-        .collect();
-    index.rebuild(vectors)?;
-    Ok(Some(index))
+    let slot_ids = store.slot_ids(documents)?;
+    Ok(Some(VectorIndex::build(config.dimension, view, slot_ids)?))
 }
 
-/// Aplica un lote al índice vectorial conservando el orden: los documentos
-/// consecutivos con vector se insertan juntos (en paralelo si el lote es
-/// grande) y uno sin vector borra el anterior antes de seguir.
-fn sync_vectors(vector: Option<&VectorIndex>, docs: &[IndexDoc]) -> crate::Result<()> {
-    let Some(index) = vector else {
-        return docs.iter().try_for_each(|doc| sync_vector(None, doc));
+/// Refleja la tanda en el grafo. Las ranuras nuevas (una por documento con
+/// vector, en orden) se enlazan de golpe; un documento cuya última aparición en
+/// la tanda no trae vector pierde el suyo.
+fn sync_vectors(
+    vector: Option<&VectorIndex>,
+    view: Option<Arc<View>>,
+    docs: &[IndexDoc],
+) -> crate::Result<()> {
+    let (Some(index), Some(view)) = (vector, view) else {
+        return if docs.iter().any(|doc| doc.vector.is_some()) {
+            Err(crate::IndexError::VectorIndexDisabled)
+        } else {
+            Ok(())
+        };
     };
-    let mut pending: Vec<(&str, &[f32])> = Vec::new();
+    let with_vector: Vec<&str> = docs
+        .iter()
+        .filter(|doc| doc.vector.is_some())
+        .map(|doc| doc.id.as_str())
+        .collect();
+    if !with_vector.is_empty() {
+        index.add_slots(view, &with_vector)?;
+    }
+    let mut last: HashMap<&str, bool> = HashMap::new();
     for doc in docs {
-        match doc.vector.as_deref() {
-            Some(v) => pending.push((doc.id.as_str(), v)),
-            None => {
-                index.insert_many(&pending)?;
-                pending.clear();
-                index.delete(&doc.id)?;
-            }
+        last.insert(doc.id.as_str(), doc.vector.is_some());
+    }
+    for (id, has_vector) in last {
+        if !has_vector {
+            index.delete(id)?;
         }
     }
-    index.insert_many(&pending)
-}
-
-fn sync_vector(vector: Option<&VectorIndex>, doc: &IndexDoc) -> crate::Result<()> {
-    match (vector, &doc.vector) {
-        (Some(index), Some(vector)) => index.insert(doc.id.clone(), vector.clone()),
-        (Some(index), None) => index.delete(&doc.id),
-        (None, Some(_)) => Err(crate::IndexError::VectorIndexDisabled),
-        (None, None) => Ok(()),
-    }
+    Ok(())
 }
 
 fn merge_rankings(
