@@ -10,7 +10,8 @@ const { JsHiveDb } = require("../native.cjs") as {
 export type HiveDBErrorCode =
   | "INVALID_VECTOR"
   | "VECTOR_SPACE_MISMATCH"
-  | "INDEX_DEGRADED";
+  | "INDEX_DEGRADED"
+  | "EMBEDDER_UNAVAILABLE";
 
 export class HiveDBError extends Error {
   constructor(
@@ -28,6 +29,7 @@ function rethrowSemanticError(error: unknown): never {
     "INVALID_VECTOR",
     "VECTOR_SPACE_MISMATCH",
     "INDEX_DEGRADED",
+    "EMBEDDER_UNAVAILABLE",
   ] as const) {
     if (message.includes(`${code}:`)) throw new HiveDBError(code, message);
   }
@@ -78,6 +80,7 @@ interface JsHiveDbInner {
 
 interface JsOpenOptions {
   vector?: VectorOptions;
+  embedder?: "local";
 }
 
 interface JsIndexDoc {
@@ -270,6 +273,15 @@ export interface ScalarFilter {
 export interface OpenOptions {
   /** Omitir para usar BM25 en modo solo texto. */
   vector?: VectorOptions;
+  /**
+   * `"local"` genera los embeddings dentro de HiveDB (multilingual-e5-small,
+   * 384 dimensiones, español e inglés): los documentos sin `vector` se embeben
+   * a partir de su texto y las consultas de texto buscan también por
+   * significado. Requiere un binario con el embedder incluido; la primera
+   * apertura descarga el modelo (~470 MB). Los `vector` explícitos siguen
+   * teniendo prioridad. No hace falta indicar `vector`.
+   */
+  embedder?: "local";
 }
 
 export interface VectorOptions {

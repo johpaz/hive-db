@@ -112,6 +112,9 @@ pub struct JsVectorOptions {
 pub struct JsOpenOptions {
     /// Omitir para usar el modo solo texto.
     pub vector: Option<JsVectorOptions>,
+    /// `"local"` activa el embedder local (requiere un binario compilado con la
+    /// feature `embedder-local`): los documentos sin vector se embeben solos.
+    pub embedder: Option<String>,
 }
 
 #[napi(object)]
@@ -166,6 +169,25 @@ pub struct JsPredicate {
     pub path: Option<String>,
     /// JSON-encoded value used by `Eq` and `Contains`.
     pub value: Option<String>,
+}
+
+/// Carga el embedder local fuera del hilo asíncrono: la primera vez descarga
+/// el modelo (~470 MB) y siempre lo mapea en memoria.
+#[cfg(feature = "embedder-local")]
+async fn load_local_embedder() -> Result<Arc<dyn hivedb_core::Embedder>> {
+    tokio::task::spawn_blocking(hivedb_embed::LocalEmbedder::multilingual_e5_small)
+        .await
+        .map_err(js_err)?
+        .map(|embedder| Arc::new(embedder) as Arc<dyn hivedb_core::Embedder>)
+        .map_err(js_err)
+}
+
+#[cfg(not(feature = "embedder-local"))]
+async fn load_local_embedder() -> Result<Arc<dyn hivedb_core::Embedder>> {
+    Err(Error::from_reason(
+        "EMBEDDER_UNAVAILABLE: this build was compiled without the local embedder \
+         (feature `embedder-local`)",
+    ))
 }
 
 fn js_err<E: std::fmt::Display>(e: E) -> Error {
@@ -492,10 +514,22 @@ impl JsHiveDB {
 impl JsHiveDB {
     #[napi(factory)]
     pub async fn open(path: String, options: Option<JsOpenOptions>) -> Result<Self> {
+        let (vector, embedder) = match options {
+            Some(o) => (o.vector, o.embedder),
+            None => (None, None),
+        };
         let open_options = OpenOptions {
-            vector: options
-                .and_then(|o| o.vector)
+            vector: vector
                 .map(|vector| VectorOptions::new(vector.dimension as usize, vector.space_id)),
+            embedder: match embedder.as_deref() {
+                None => None,
+                Some("local") => Some(load_local_embedder().await?),
+                Some(other) => {
+                    return Err(Error::from_reason(format!(
+                        "unknown embedder: {other} (only \"local\" is supported)"
+                    )));
+                }
+            },
         };
         // ":memory:" opens an ephemeral database backed by a process-lifetime
         // temporary directory, so tests never touch persistent storage.

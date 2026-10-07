@@ -191,7 +191,29 @@ await db.upsertDoc({
 await db.upsertBatch(docs);
 ```
 
-El vector es opcional y se genera fuera de HiveDB. Para usarlo debes declarar explícitamente un espacio estable al abrir; omitir `vector` deja la base en modo texto:
+El vector es opcional. Hay dos formas de obtenerlo: que HiveDB lo genere (embedder local, abajo) o aportar el tuyo.
+
+#### Embedder local (sin configurar vectores)
+
+Con `embedder: "local"`, HiveDB genera los embeddings a partir del texto. No hace falta indicar `vector`, ni dimensión, ni `spaceId`:
+
+```ts
+const db = await HiveDB.open("./data", { embedder: "local" });
+
+await db.upsertDoc({ id: "a", body: "Cómo configurar tu cuenta de email" });
+await db.queryHybrid({ text: "correo electrónico", k: 3 }); // encuentra "a" aunque no comparta palabras
+```
+
+- **Modelo:** `intfloat/multilingual-e5-small` (licencia MIT, 384 dimensiones, español, inglés y más). El resultado coincide con el modelo ONNX oficial a ~1e-7 por componente.
+- **Primera apertura:** descarga el modelo (~470 MB) a `~/.cache/hivedb/models` (cambia la ruta con `HIVEDB_MODEL_DIR`). Se verifica con SHA-256 y no se vuelve a descargar. Con `HIVEDB_OFFLINE=1` nunca accede a la red y falla con `EMBEDDER_UNAVAILABLE` si falta el modelo.
+- **Requiere un binario con el embedder incluido** (feature de Cargo `embedder-local`, +6 MB). Si no, `open` falla con `EMBEDDER_UNAVAILABLE`.
+- **Cómo cambia el comportamiento:** los documentos sin `vector` pero con texto se embeben (`name`, `tags` y `body`); una consulta de texto sin `vector` también busca por significado, así que sus puntuaciones pasan a ser RRF y no BM25 puro. Un `vector` que aportes tú siempre tiene prioridad.
+- **Rendimiento (CPU, 16 núcleos):** ~60 documentos/s al indexar y ~50 ms por consulta de texto. Indexar corpus grandes es lento; para eso puedes aportar tus propios vectores.
+- **Cambiar de modelo:** una base queda ligada al modelo con que se creó; abrirla con otro falla con `VECTOR_SPACE_MISMATCH`.
+
+#### Aportar tus propios vectores
+
+Para usar tu propio modelo debes declarar explícitamente un espacio estable al abrir; omitir `vector` deja la base en modo texto:
 
 ```ts
 const db = await HiveDB.open("./data", {

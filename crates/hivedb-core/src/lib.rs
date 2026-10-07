@@ -43,4 +43,6 @@ pub use harness::{
 
 // Re-export hybrid-search types from the index layer so consumers only need
 // one import.
-pub use hivedb_index::{FieldBoosts, Fusion, Hit, HybridQuery, IndexDoc, ScalarFilter};
+pub use hivedb_index::{
+    EmbedKind, Embedder, FieldBoosts, Fusion, Hit, HybridQuery, IndexDoc, ScalarFilter,
+};

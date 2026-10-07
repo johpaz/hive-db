@@ -1,12 +1,14 @@
 //! HiveDB index layer: BM25 full-text (`tantivy`), ANN vectors (`hnsw_rs`)
 //! and Reciprocal Rank Fusion.
 
+pub mod embed;
 pub mod hnsw;
 pub mod index;
 pub mod rrf;
 pub mod text;
 pub mod types;
 
+pub use embed::{EmbedKind, Embedder};
 pub use hnsw::{DEFAULT_EF_SEARCH, VectorIndex};
 pub use index::SemanticIndex;
 pub use rrf::rrf;
@@ -36,6 +38,9 @@ pub enum IndexError {
 
     #[error("INVALID_VECTOR: open the database with an explicit vector configuration")]
     VectorIndexDisabled,
+
+    #[error("EMBEDDER_UNAVAILABLE: {0}")]
+    Embedder(String),
 
     #[error("VECTOR_SPACE_MISMATCH: {0}")]
     VectorSpaceMismatch(String),

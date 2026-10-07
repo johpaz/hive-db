@@ -8,6 +8,8 @@ HiveDB es un motor de base de datos embebido en Rust con tres crates:
 
 - `crates/hivedb-core` — event-log, proyecciones, working memory, reactive engine, consent graph.
 - `crates/hivedb-index` — índice semántico híbrido (BM25 + ANN + RRF).
+- `crates/hivedb-embed` — embedder local opcional (`multilingual-e5-small` sobre `candle`, Rust puro). Implementa el trait `Embedder` de `hivedb-index`.
+- `crates/hivedb-bench` — benchmarks reproducibles (`publish = false`); `comparadores/` tiene los scripts de Python contra sqlite-vec y LanceDB.
 - `crates/hivedb-napi` — binding napi-rs 3.x que expone `HiveDB` a Bun/Node.
 
 El log es **append-only e inmutable**. El motor asigna `seq` y `timestamp`. Las proyecciones se actualizan atómicamente dentro de la misma transacción `redb` (por shard desde G7).
@@ -78,6 +80,9 @@ crates/hivedb-core/tests/
 - Sharding por `agent_id` (un archivo `redb` por agente) para evitar el single-writer global de `redb`.
 - `ConsentGraph` se mantiene en un shard global separado `_global.redb`.
 - El contador `seq` persiste en la tabla `meta` del shard global (`_global.redb`) bajo la clave `"next_seq"`, pero **solo en eventos globales** (`ConsentGranted`, `ConsentRevoked`, `IntentLogged`) y en el `Drop` de `HiveDB`. Los eventos normales de agente no tocan `_global.redb`, preservando el sharding por agente. Las reaperturas usan el valor persistido y caen al escaneo de shards si la clave no existe o está atrasada.
+- El grafo HNSW se vuelca a `hnsw/` al cerrar (`Drop` de `SemanticIndex`) y se restaura al abrir solo si coinciden `generation`, `space_id`, dimensión y número de puntos; ante cualquier duda se reconstruye (en paralelo). Es un índice derivado: nunca es fuente de verdad. `hnsw_rs` hace `panic!` con ficheros corruptos, por eso la carga va dentro de `catch_unwind`.
+- `HiveDB::read(seq)` no depende de que `seq_to_agent` esté completo: tras un cierre limpio arranca vacío y `locate_and_read` busca el `seq` por los shards. No lo rellenes escaneando al abrir (rompe el arranque O(1)).
+- Embedder (`OpenOptions.embedder`): si hay uno, fija el espacio vectorial (`space_id` del modelo + revisión); los documentos sin vector se embeben y las consultas de texto sin vector también buscan por vector. El vector explícito siempre gana. El modelo se descarga bajo demanda (~470 MB) a una caché verificada por SHA-256; `HIVEDB_OFFLINE=1` lo impide. La feature `embedder-local` de `hivedb-napi` está apagada por defecto (+6 MB de binario); el CI no la compila todavía.
 - `HiveDB::open_in_memory()` no materializa proyecciones ni índice semántico; es solo para `loom`.
 
 ## Workarounds conocidos

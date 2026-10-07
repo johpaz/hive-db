@@ -82,6 +82,10 @@ name = "g12_tenant_isolation"
 path = "tests/g12_tenant_isolation.rs"
 
 [[test]]
+name = "g13_embedder"
+path = "tests/g13_embedder.rs"
+
+[[test]]
 name = "g12b_reopen_read"
 path = "tests/g12b_reopen_read.rs"
 

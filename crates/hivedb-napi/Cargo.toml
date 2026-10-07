@@ -11,8 +11,14 @@ description = "Binding napi-rs de HiveDB para Bun/Node.js."
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Embedder local (multilingual-e5-small sobre candle). Apagado por defecto: añade
+# el motor de inferencia al binario nativo.
+embedder-local = ["dep:hivedb-embed"]
+
 [dependencies]
 hivedb-core = { path = "../hivedb-core" }
+hivedb-embed = { path = "../hivedb-embed", optional = true }
 hivedb-index = { path = "../hivedb-index" }
 napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
 napi-derive = "3"

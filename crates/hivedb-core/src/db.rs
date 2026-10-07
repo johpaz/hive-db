@@ -14,7 +14,9 @@ use crate::state::{
     task_state::TaskState,
     tool_ledger::{ToolLedger, ToolStats},
 };
-use hivedb_index::{Hit, HybridQuery, IndexDoc, ScalarFilter, SemanticIndex};
+use hivedb_index::{
+    EmbedKind, Embedder, Hit, HybridQuery, IndexDoc, ScalarFilter, SemanticIndex, VectorConfig,
+};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,8 +27,13 @@ pub use hivedb_index::VectorConfig as VectorOptions;
 /// Options for opening a database.
 #[derive(Clone, Debug, Default)]
 pub struct OpenOptions {
-    /// Identidad explícita del espacio vectorial. `None` activa modo solo texto.
+    /// Identidad explícita del espacio vectorial. `None` activa modo solo texto,
+    /// salvo que haya un `embedder`, que fija el espacio por sí mismo.
     pub vector: Option<VectorOptions>,
+    /// Generador de embeddings. Con él, los documentos sin vector se embeben a
+    /// partir de su texto y las consultas de texto buscan también por vector.
+    /// Los vectores aportados explícitamente tienen siempre prioridad.
+    pub embedder: Option<Arc<dyn Embedder>>,
 }
 
 /// Public handle to a HiveDB database.
@@ -38,6 +45,7 @@ pub struct HiveDB {
     log: LogHandle,
     working: Arc<WorkingMemory>,
     semantic: Option<Arc<SemanticIndex>>,
+    embedder: Option<Arc<dyn Embedder>>,
     collections: Option<Arc<Collections>>,
     reactive: Arc<ReactiveEngine>,
     clock: Arc<dyn Clock>,
@@ -189,10 +197,8 @@ impl HiveDB {
         let registry = default_registry();
         let log = LogHandle::Redb(Arc::new(EventLog::open(&base, registry, clock.clone())?));
         let working = Arc::new(WorkingMemory::new());
-        let semantic = Some(Arc::new(SemanticIndex::open(
-            &base,
-            options.vector.clone(),
-        )?));
+        let vector = resolve_vector_options(&options)?;
+        let semantic = Some(Arc::new(SemanticIndex::open(&base, vector)?));
         let collections = Some(Arc::new(Collections::open(&base)?));
         let reactive = Arc::new(ReactiveEngine::new());
 
@@ -200,6 +206,7 @@ impl HiveDB {
             log,
             working,
             semantic,
+            embedder: options.embedder,
             collections,
             reactive,
             clock,
@@ -241,6 +248,7 @@ impl HiveDB {
             log,
             working,
             semantic,
+            embedder: None,
             collections,
             reactive,
             clock,
@@ -361,13 +369,54 @@ impl HiveDB {
 
     /// Insert or replace a document in the semantic index.
     pub fn upsert_doc(&self, doc: &IndexDoc) -> HiveResult<()> {
-        self.semantic()?.upsert(doc).map_err(Into::into)
+        self.upsert_batch(std::slice::from_ref(doc))
     }
 
     /// Insert or replace a batch of documents under a single text-index
     /// commit.
+    ///
+    /// Con un `embedder` configurado, los documentos sin vector pero con texto
+    /// se embeben aquí, en un único lote.
     pub fn upsert_batch(&self, docs: &[IndexDoc]) -> HiveResult<()> {
-        self.semantic()?.upsert_batch(docs).map_err(Into::into)
+        let semantic = self.semantic()?;
+        match self.embed_missing_vectors(docs)? {
+            Some(embedded) => semantic.upsert_batch(&embedded),
+            None => semantic.upsert_batch(docs),
+        }
+        .map_err(Into::into)
+    }
+
+    /// Genera el vector de los documentos que tienen texto y no traen vector.
+    /// Devuelve `None` si no hay nada que embeber (sin embedder, o todos los
+    /// documentos ya traen vector o no tienen texto).
+    fn embed_missing_vectors(&self, docs: &[IndexDoc]) -> HiveResult<Option<Vec<IndexDoc>>> {
+        let Some(embedder) = self.embedder.as_ref() else {
+            return Ok(None);
+        };
+        let pending: Vec<(usize, String)> = docs
+            .iter()
+            .enumerate()
+            .filter(|(_, doc)| doc.vector.is_none())
+            .filter_map(|(i, doc)| document_text(doc).map(|text| (i, text)))
+            .collect();
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        let texts: Vec<&str> = pending.iter().map(|(_, text)| text.as_str()).collect();
+        let vectors = embedder.embed(&texts, EmbedKind::Document)?;
+        if vectors.len() != pending.len() {
+            return Err(hivedb_index::IndexError::Embedder(format!(
+                "el embedder devolvió {} vectores para {} textos",
+                vectors.len(),
+                pending.len()
+            ))
+            .into());
+        }
+        let mut embedded = docs.to_vec();
+        for ((i, _), vector) in pending.into_iter().zip(vectors) {
+            embedded[i].vector = Some(vector);
+        }
+        Ok(Some(embedded))
     }
 
     /// Delete a document from the semantic index. Missing ids are a no-op.
@@ -486,8 +535,23 @@ impl HiveDB {
     }
 
     /// Execute a hybrid search query.
-    pub fn query_hybrid(&self, query: HybridQuery) -> HiveResult<Vec<Hit>> {
-        self.semantic()?.query_hybrid(query).map_err(Into::into)
+    ///
+    /// Con un `embedder` configurado, una consulta de texto sin vector también
+    /// busca por vector, por lo que el resultado pasa a ser una fusión RRF.
+    pub fn query_hybrid(&self, mut query: HybridQuery) -> HiveResult<Vec<Hit>> {
+        let semantic = self.semantic()?;
+        let to_embed = match (self.embedder.as_ref(), query.vector.as_ref()) {
+            (Some(embedder), None) => query
+                .text
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| (embedder, text.to_string())),
+            _ => None,
+        };
+        if let Some((embedder, text)) = to_embed {
+            query.vector = embedder.embed(&[text.as_str()], EmbedKind::Query)?.pop();
+        }
+        semantic.query_hybrid(query).map_err(Into::into)
     }
 
     /// Subscribe to a pattern of events.
@@ -611,6 +675,36 @@ impl Decision {
     pub fn intent_log_seq(&self) -> Option<u64> {
         self.intent_log_seq
     }
+}
+
+/// Espacio vectorial efectivo: el del embedder si lo hay (y debe coincidir con
+/// `vector` si ambos se indican), o el explícito en otro caso.
+fn resolve_vector_options(options: &OpenOptions) -> HiveResult<Option<VectorOptions>> {
+    let Some(embedder) = options.embedder.as_ref() else {
+        return Ok(options.vector.clone());
+    };
+    let from_embedder = VectorConfig::new(embedder.dimension(), embedder.space_id());
+    match options.vector.as_ref() {
+        Some(explicit) if explicit != &from_embedder => {
+            Err(hivedb_index::IndexError::VectorSpaceMismatch(format!(
+                "el espacio vectorial indicado {explicit:?} no coincide con el del embedder {from_embedder:?}"
+            ))
+            .into())
+        }
+        _ => Ok(Some(from_embedder)),
+    }
+}
+
+/// Texto que representa al documento ante el embedder: nombre, etiquetas y
+/// cuerpo, en ese orden. `None` si no tiene texto.
+fn document_text(doc: &IndexDoc) -> Option<String> {
+    let parts: Vec<&str> = [&doc.name, &doc.tags, &doc.body]
+        .into_iter()
+        .filter_map(|part| part.as_deref())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 fn default_registry() -> ProjectionRegistry {

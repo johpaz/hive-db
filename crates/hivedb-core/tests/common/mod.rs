@@ -11,6 +11,7 @@ pub fn db() -> HiveDB {
 pub fn vector_db() -> HiveDB {
     HiveDB::open_temp_with_options(OpenOptions {
         vector: Some(VectorOptions::new(384, "test:384")),
+        ..Default::default()
     })
     .expect("open temp vector db")
 }

@@ -5,6 +5,7 @@ members = [
     "crates/hivedb-index",
     "crates/hivedb-napi",
     "crates/hivedb-bench",
+    "crates/hivedb-embed",
 ]
 
 [workspace.package]

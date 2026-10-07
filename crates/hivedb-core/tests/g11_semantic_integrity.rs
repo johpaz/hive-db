@@ -12,6 +12,7 @@ fn concurrent_upserts_never_mix_text_and_vector_generations() {
     let db = Arc::new(
         HiveDB::open_temp_with_options(OpenOptions {
             vector: Some(VectorOptions::new(8, "test:8")),
+            ..Default::default()
         })
         .unwrap(),
     );

@@ -7,6 +7,7 @@ use serde_json::json;
 fn vector_db() -> HiveDB {
     HiveDB::open_temp_with_options(OpenOptions {
         vector: Some(VectorOptions::new(384, "test:384")),
+        ..Default::default()
     })
     .unwrap()
 }
