@@ -2,7 +2,7 @@
 
 Motor de base de datos embebido, local-first y agent-native para agentes de IA: event-log inmutable, proyecciones deterministas, búsqueda híbrida BM25 + vectorial, colecciones de documentos mutables, grafo de consentimiento y suscripciones reactivas — todo en un solo directorio, sin daemon ni dependencias de red.
 
-Núcleo en Rust (`redb` + `tantivy` + `hnsw_rs`), expuesto a Bun/Node vía `napi-rs`.
+Núcleo en Rust (`redb` + `tantivy` + HNSW propio), expuesto a Bun/Node vía `napi-rs`.
 
 ## Instalación
 
@@ -49,7 +49,7 @@ db.close();
 |---|---|
 | Event log append-only + proyecciones | `redb` |
 | Búsqueda de texto (BM25, stemming español) | `tantivy` |
-| Búsqueda vectorial (ANN) | `hnsw_rs` |
+| Búsqueda vectorial (ANN) | HNSW propio |
 | Fusión de resultados híbridos | Reciprocal Rank Fusion propio |
 | Colecciones de documentos (CRUD mutable) | `redb` |
 | Grafo de consentimiento / intent audit | proyección sobre el event log |

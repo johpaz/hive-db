@@ -7,7 +7,7 @@ Núcleo Rust de HiveDB. Implementa el event-log append-only y las proyecciones d
 - **G1 — Event Log**: `seq` monotónico global asignado por el motor, log inmutable, corrección vía evento de invalidación.
 - **G2 — Proyecciones**: estado derivado en la misma transacción `redb` que el append; replay desde cero reconstruye el estado idéntico.
 - **G3 — Working Memory**: almacenamiento en memoria `DashMap` con TTL por entrada; no persiste al log.
-- **G4 — Semantic Memory**: búsqueda híbrida BM25 (`tantivy`) + ANN (`hnsw_rs`) con fusión RRF; filtros escalares empujados al índice.
+- **G4 — Semantic Memory**: búsqueda híbrida BM25 (`tantivy`) + ANN (HNSW propio) con fusión RRF; filtros escalares empujados al índice.
 - **G5 — Reactive Engine**: suscripciones push con `tokio::sync::mpsc`; matching por agente, tipo de evento y stream.
 
 ## Decisiones técnicas

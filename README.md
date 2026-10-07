@@ -39,7 +39,7 @@ HiveDB modela el estado como un **event-log append-only inmutable** sobre el que
 │  └────────────────────────────────────────────────────┘ │
 │        │              │                  │              │
 │  ┌─────┴──────┐ ┌─────┴──────┐  ┌────────┴─────────┐   │
-│  │ redb (KV)  │ │ tantivy    │  │ hnsw_rs (vector) │   │
+│  │ redb (KV)  │ │ tantivy    │  │ HNSW (vector)    │   │
 │  │ log+state  │ │ (BM25/FTS) │  │ (ANN/semantic)   │   │
 │  └────────────┘ └────────────┘  └──────────────────┘   │
 │  ┌──────────────────────────────────────────────────┐  │
@@ -59,15 +59,15 @@ reales son las capas de memoria para agentes y los motores vectoriales embebidos
 
 | | Vector p50 | recall@10 | Arranque en frío | Disco | Búsqueda híbrida |
 |---|---:|---:|---:|---:|:---:|
-| **HiveDB** (HNSW) | 2,0 ms | 0,96 | 2,1 s | 495 MiB | Sí (3,0 ms p50) |
+| **HiveDB** (HNSW) | 0,6 ms | 1,00 | 34 ms | 429 MiB | Sí (1,5 ms p50) |
 | sqlite-vec (exacto) | 65,5 ms | 1,00 | 67 ms | 149 MiB | No |
 | LanceDB (exacto) | 162,2 ms | 1,00 | 190 ms | 147 MiB | No |
 | LanceDB (IVF_HNSW_SQ, ajustado) | 2,4 ms | 0,95 | 79 ms | 203 MiB | No |
 
-A igual recall, la búsqueda vectorial de HiveDB y la de LanceDB ajustado están en el mismo
-orden de magnitud. Honestidad por delante: HiveDB **arranca más lento (2,1 s frente a
-~0,1 s), ocupa más disco (~2,5×) e ingiere mucho más despacio (~0,7k docs/s)**, y su p99 es
-peor. A cambio ofrece el log causal, el consentimiento y la búsqueda híbrida que los otros
+A igual recall, la búsqueda vectorial de HiveDB es más rápida que la de LanceDB ajustado
+(0,975 de recall en 0,5 ms frente a 0,95 en 2,4 ms). Honestidad por delante: HiveDB **ocupa
+más disco (~2,1× LanceDB y ~2,9× sqlite-vec) e ingiere más despacio (~8k docs/s frente a
+12k–109k)**. A cambio ofrece el log causal, el consentimiento y la búsqueda híbrida que los otros
 no tienen. Detalle, curvas de `ef` y mejoras pendientes en `docs/BENCHMARKS.md`.
 
 **Comparación cualitativa** (no medida; según la documentación pública de cada proyecto):
@@ -84,7 +84,7 @@ no tienen. Detalle, curvas de `ef` y mejoras pendientes en `docs/BENCHMARKS.md`.
 ## Crates
 
 - **`hivedb-core`** — motor de event-log, proyecciones, memoria de trabajo, motor reactivo y grafo de consentimiento.
-- **`hivedb-index`** — índice semántico híbrido: BM25 (`tantivy`) + ANN (`hnsw_rs`) + RRF propio.
+- **`hivedb-index`** — índice semántico híbrido: BM25 (`tantivy`) + ANN (HNSW propio) + RRF propio.
 - **`hivedb-embed`** — embedder local opcional (`multilingual-e5-small` sobre `candle`); ver `docs/USER_GUIDE.md`.
 - **`hivedb-bench`** — benchmarks reproducibles ([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)).
 - **`hivedb-napi`** — binding napi-rs que expone `HiveDB` a Bun/Node.
@@ -96,7 +96,7 @@ no tienen. Detalle, curvas de `ef` y mejoras pendientes en `docs/BENCHMARKS.md`.
 - ✅ G1: Event Log append-only sobre `redb`, `seq` monotónico asignado por el motor.
 - ✅ G2: Proyecciones deterministas (`CurrentFacts`, `TaskState`) con replay idéntico.
 - ✅ G3: Working memory con TTL (`DashMap`).
-- ✅ G4: Semantic memory híbrida (`tantivy` + `hnsw_rs` + RRF).
+- ✅ G4: Semantic memory híbrida (`tantivy` + HNSW propio + RRF).
 - ✅ G5: Reactive engine con suscripciones push.
 - ✅ G6: Consent Graph (`can()`, `IntentLogged`, expiración controlada).
 - ✅ G7: Concurrencia particionada por `agent_id` + test `loom`.

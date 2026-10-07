@@ -24,7 +24,7 @@ hive-db/
 | Crate / Paquete | Responsabilidad | Tecnologías clave |
 |---|---|---|
 | `hivedb-core` | Event-log sharded, proyecciones deterministas, working memory, motor reactivo, consent graph | `redb`, `dashmap`, `tokio`, `serde_json` |
-| `hivedb-index` | BM25 full-text (`tantivy`), ANN vectorial (`hnsw_rs`), fusión RRF | `tantivy`, `hnsw_rs` |
+| `hivedb-index` | BM25 full-text (`tantivy`), ANN vectorial (HNSW propio), fusión RRF | `tantivy`, `rayon`, `memmap2` |
 | `hivedb-napi` | Expone `HiveDB` al runtime JS vía napi-rs | `napi`, `napi-derive`, `tokio` |
 | `@johpaz/hive-db` | API ergonómica TypeScript, async iterators, tipos | Bun |
 
@@ -150,7 +150,8 @@ No expongas `seq` ni `timestamp` en `EventInput`. Hay un test `compile_fail` (`t
 | Módulo | Responsabilidad |
 |---|---|
 | `text.rs` | `TextIndex` sobre `tantivy`: indexado y BM25. |
-| `hnsw.rs` | `VectorIndex` sobre `hnsw_rs`: ANN de vectores `f32`. |
+| `hnsw.rs` | `VectorIndex`: ids de documento, tombstones y volcado a disco sobre el grafo plano. |
+| `flat_hnsw.rs` | HNSW propio de almacenamiento plano (`u32` + vectores mapeados con `mmap`), construcción por tandas en paralelo y determinista. |
 | `rrf.rs` | Fusión Reciprocal Rank. |
 | `index.rs` | `SemanticIndex` orquesta text + vector + RRF. |
 

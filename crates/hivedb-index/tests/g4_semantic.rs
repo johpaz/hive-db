@@ -614,3 +614,41 @@ fn ef_search_mejora_recall_vectorial() {
     );
     assert!(alto > 0.9, "ef=800 debe dar recall@10 > 0.9, dio {alto}");
 }
+
+#[test]
+fn lote_grande_conserva_semantica_de_upsert_y_borrado() {
+    // Un lote de >= 64 se inserta en paralelo; debe comportarse igual que
+    // insertar uno a uno: gana la última versión de un id y un documento sin
+    // vector borra el vector anterior.
+    let dir = tempfile::tempdir().unwrap();
+    let index = SemanticIndex::open(dir.path(), Some(VectorConfig::new(4, "test:4"))).unwrap();
+    let vec_de = |i: usize| vec![1.0, (i % 7) as f32, (i % 11) as f32, 0.5];
+
+    let mut docs: Vec<IndexDoc> = (0..200)
+        .map(|i| IndexDoc::new(format!("d{i}")).with_vector(vec_de(i)))
+        .collect();
+    // d5 aparece de nuevo con otro vector (gana este) y d6 queda sin vector.
+    docs.push(IndexDoc::new("d5").with_vector(vec![0.0, 0.0, 0.0, 9.0]));
+    docs.push(IndexDoc::new("d6"));
+    index.upsert_batch(&docs).unwrap();
+
+    assert_eq!(index.vector_stats().unwrap().0, 199);
+
+    let hits = index
+        .query_hybrid(
+            HybridQuery::default()
+                .with_vector(vec![0.0, 0.0, 0.0, 1.0])
+                .with_k(1),
+        )
+        .unwrap();
+    assert_eq!(hits[0].id, "d5");
+
+    let todos = index
+        .query_hybrid(
+            HybridQuery::default()
+                .with_vector(vec![1.0, 1.0, 1.0, 0.5])
+                .with_k(50),
+        )
+        .unwrap();
+    assert!(todos.iter().all(|h| h.id != "d6"));
+}

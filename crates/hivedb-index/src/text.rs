@@ -185,6 +185,11 @@ impl TextIndex {
         drop_and_commit(writer)
     }
 
+    /// Número de documentos visibles en el índice.
+    pub fn num_docs(&self) -> crate::Result<u64> {
+        Ok(self.reader.searcher().num_docs())
+    }
+
     /// Remove every document from the index.
     pub fn clear(&self) -> crate::Result<()> {
         let mut writer = self.writer.lock().unwrap();

@@ -254,6 +254,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let dir = tempfile::tempdir()?;
+    // HIVE_BENCH_KEEP=ruta copia la base a esa ruta al terminar (para inspeccionar el disco).
+    let conservar = std::env::var("HIVE_BENCH_KEEP").ok();
     let config = Some(VectorConfig::new(DIMENSION, "bench:384"));
     let documentos: Vec<IndexDoc> = (0..docs)
         .map(|i| {
@@ -306,6 +308,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(index);
     let cierre = t.elapsed();
     let disco = tamano_dir(dir.path());
+    if let Some(ruta) = conservar {
+        let ruta = Path::new(&ruta);
+        let _ = std::fs::remove_dir_all(ruta);
+        std::fs::create_dir_all(ruta)?;
+        for entrada in std::fs::read_dir(dir.path())?.flatten() {
+            let destino = ruta.join(entrada.file_name());
+            if entrada.path().is_dir() {
+                std::fs::create_dir_all(&destino)?;
+                for sub in std::fs::read_dir(entrada.path())?.flatten() {
+                    std::fs::copy(sub.path(), destino.join(sub.file_name()))?;
+                }
+            } else {
+                std::fs::copy(entrada.path(), destino)?;
+            }
+        }
+        println!("base conservada en {}", ruta.display());
+    }
+    if let Ok(entradas) = std::fs::read_dir(dir.path()) {
+        for e in entradas.flatten() {
+            let mib = tamano_dir(&e.path()) as f64 / 1_048_576.0;
+            println!("disco_detalle {}={mib:.1}", e.file_name().to_string_lossy());
+        }
+    }
 
     let t = Instant::now();
     let reabierto = SemanticIndex::open(dir.path(), config)?;

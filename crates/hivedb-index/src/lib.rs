@@ -1,7 +1,8 @@
-//! HiveDB index layer: BM25 full-text (`tantivy`), ANN vectors (`hnsw_rs`)
+//! HiveDB index layer: BM25 full-text (`tantivy`), ANN vectors (HNSW propio)
 //! and Reciprocal Rank Fusion.
 
 pub mod embed;
+mod flat_hnsw;
 pub mod hnsw;
 pub mod index;
 pub mod rrf;

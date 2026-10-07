@@ -1,30 +1,28 @@
-use hnsw_rs::api::AnnT;
-use hnsw_rs::hnswio::HnswIo;
-use hnsw_rs::prelude::*;
+//! Índice vectorial derivado: ids de documento sobre el grafo plano de
+//! [`crate::flat_hnsw`], con borrados por tombstone y volcado a disco.
+
+use crate::flat_hnsw::Graph;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 pub const MAX_VECTOR_DIMENSION: usize = 65_536;
 
-/// `ef` de búsqueda HNSW por defecto. Con 50 el recall@10 era 0,27 (aleatorio)
-/// y 0,73 (agrupado) en 10k docs; con 200 sube a 0,62 y 0,87.
+/// `ef` de búsqueda HNSW por defecto: con 200 el recall@10 a 100k vectores
+/// agrupados es ~0,96 (ver `docs/BENCHMARKS.md`).
 pub const DEFAULT_EF_SEARCH: usize = 200;
-/// Vecinos por nodo y capa. 24 sube mucho el recall frente a 16 con poco coste.
+/// Vecinos por nodo y capa (la capa 0 admite el doble).
 const HNSW_M: usize = 24;
-/// Pista de capacidad para `hnsw_rs`; no es un límite duro.
-const MAX_ELEMENTS: usize = 100_000;
-/// `hnsw_rs` lo recorta a su máximo interno (16).
-const HNSW_MAX_LAYER: usize = 16;
-/// Candidatos explorados al insertar. Con 16 (valor erróneo anterior, por
-/// argumentos mal ordenados) el recall a 100k era ~0,43 con `ef=200`.
+/// Candidatos explorados al insertar.
 const HNSW_EF_CONSTRUCTION: usize = 100;
 
-const GRAPH_BASENAME: &str = "vectors";
 const GRAPH_META_FILE: &str = "vectors.meta";
-const GRAPH_DUMP_VERSION: u32 = 1;
+const GRAPH_FILE: &str = "vectors.hnsw.graph";
+const DATA_FILE: &str = "vectors.hnsw.data";
+/// Versión 3: grafo plano propio (`flat_hnsw`). Los volcados de `hnsw_rs`
+/// (versiones 1 y 2) no sirven y se reconstruyen.
+const GRAPH_DUMP_VERSION: u32 = 3;
 
 /// Metadatos del volcado del grafo. Se escribe al final y por rename: sin
 /// este archivo el volcado se considera inexistente.
@@ -40,56 +38,33 @@ struct DumpMeta {
     data_len: u64,
 }
 
-/// Carga el grafo tomando el `HnswIo` por valor, para que el resultado no
-/// dependa de un préstamo local.
-fn load_static(io: &'static mut HnswIo) -> Option<Hnsw<'static, f32, DistCosine>> {
-    io.load_hnsw::<f32, DistCosine>().ok()
-}
-
-fn move_dump_files(from: &Path, to: &Path) -> std::io::Result<()> {
-    for suffix in ["hnsw.graph", "hnsw.data"] {
-        std::fs::rename(dump_file(from, suffix), dump_file(to, suffix))?;
-    }
-    Ok(())
-}
-
-fn dump_file(dir: &Path, suffix: &str) -> std::path::PathBuf {
-    dir.join(format!("{GRAPH_BASENAME}.{suffix}"))
-}
-
-/// In-memory HNSW state. Durable vectors live in the semantic redb store;
-/// this graph is a derived index that can always be rebuilt.
+/// Estado en memoria. Los vectores duraderos viven en el almacén semántico
+/// (redb); este grafo es un índice derivado que siempre puede reconstruirse.
 struct Inner {
-    hnsw: Hnsw<'static, f32, DistCosine>,
+    graph: Graph,
     ids: Vec<String>,
     latest: HashMap<String, usize>,
     deleted: HashSet<usize>,
 }
 
 impl Inner {
-    fn new() -> Self {
+    fn new(dimension: usize) -> Self {
         Self {
-            hnsw: Hnsw::new(
-                HNSW_M,
-                MAX_ELEMENTS,
-                HNSW_MAX_LAYER,
-                HNSW_EF_CONSTRUCTION,
-                DistCosine,
-            ),
+            graph: Graph::new(dimension, HNSW_M, HNSW_EF_CONSTRUCTION),
             ids: Vec::new(),
             latest: HashMap::new(),
             deleted: HashSet::new(),
         }
     }
 
-    fn insert(&mut self, id: String, vector: &[f32]) {
-        if let Some(old) = self.latest.get(&id) {
+    /// Registra el id interno de un vector nuevo (el grafo lo recibe aparte).
+    fn register(&mut self, id: &str) {
+        if let Some(old) = self.latest.get(id) {
             self.deleted.insert(*old);
         }
         let internal_id = self.ids.len();
-        self.latest.insert(id.clone(), internal_id);
-        self.ids.push(id);
-        self.hnsw.insert((vector, internal_id));
+        self.latest.insert(id.to_string(), internal_id);
+        self.ids.push(id.to_string());
     }
 
     fn delete(&mut self, id: &str) -> bool {
@@ -105,31 +80,48 @@ impl Inner {
 
 /// Índice ANN derivado con upsert/delete mediante tombstones en memoria.
 pub struct VectorIndex {
-    inner: Mutex<Inner>,
+    inner: RwLock<Inner>,
     dimension: usize,
 }
 
 impl VectorIndex {
     pub fn new(dimension: usize) -> Self {
         Self {
-            inner: Mutex::new(Inner::new()),
+            inner: RwLock::new(Inner::new(dimension)),
             dimension,
         }
     }
 
     pub fn insert(&self, id: String, vector: Vec<f32>) -> crate::Result<()> {
-        validate_vector(&vector, self.dimension)?;
-        self.inner.lock().unwrap().insert(id, &vector);
+        self.insert_many(&[(id.as_str(), vector.as_slice())])
+    }
+
+    /// Inserta varios vectores a la vez. Con lotes grandes el grafo se enlaza
+    /// en paralelo; qué versión de cada id es la viva es lo mismo que
+    /// insertando uno a uno.
+    pub fn insert_many(&self, items: &[(&str, &[f32])]) -> crate::Result<()> {
+        for (_, vector) in items {
+            validate_vector(vector, self.dimension)?;
+        }
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut inner = self.inner.write().unwrap();
+        for (id, _) in items {
+            inner.register(id);
+        }
+        let vectors: Vec<&[f32]> = items.iter().map(|(_, vector)| *vector).collect();
+        inner.graph.insert_batch(&vectors);
         Ok(())
     }
 
     pub fn delete(&self, id: &str) -> crate::Result<()> {
-        self.inner.lock().unwrap().delete(id);
+        self.inner.write().unwrap().delete(id);
         Ok(())
     }
 
     pub fn clear(&self) -> crate::Result<()> {
-        *self.inner.lock().unwrap() = Inner::new();
+        *self.inner.write().unwrap() = Inner::new(self.dimension);
         Ok(())
     }
 
@@ -138,22 +130,15 @@ impl VectorIndex {
     where
         I: IntoIterator<Item = (&'a str, &'a [f32])>,
     {
-        // Los ids internos se asignan en orden; la inserción en el grafo es
-        // paralela (`hnsw_rs` la soporta), que es lo que domina el arranque.
-        let mut rebuilt = Inner::new();
-        let mut batch: Vec<(&[f32], usize)> = Vec::new();
+        let mut rebuilt = Inner::new(self.dimension);
+        let mut refs: Vec<&[f32]> = Vec::new();
         for (id, vector) in vectors {
             validate_vector(vector, self.dimension)?;
-            if let Some(old) = rebuilt.latest.get(id) {
-                rebuilt.deleted.insert(*old);
-            }
-            let internal_id = rebuilt.ids.len();
-            rebuilt.latest.insert(id.to_string(), internal_id);
-            rebuilt.ids.push(id.to_string());
-            batch.push((vector, internal_id));
+            rebuilt.register(id);
+            refs.push(vector);
         }
-        rebuilt.hnsw.parallel_insert_slice(&batch);
-        *self.inner.lock().unwrap() = rebuilt;
+        rebuilt.graph.insert_batch(&refs);
+        *self.inner.write().unwrap() = rebuilt;
         Ok(())
     }
 
@@ -170,22 +155,22 @@ impl VectorIndex {
             ));
         }
 
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read().unwrap();
         let want = k
             .saturating_mul(4)
             .max(k.saturating_add(inner.deleted.len()))
             .max(1);
         let ef = want.max(ef_search.unwrap_or(DEFAULT_EF_SEARCH));
-        let neighbors = inner.hnsw.search(vector, want, ef);
+        let neighbors = inner.graph.search(vector, ef, want);
 
         let mut results = Vec::with_capacity(k);
-        for neighbor in neighbors {
-            let internal_id = neighbor.d_id;
+        for (internal_id, distance) in neighbors {
+            let internal_id = internal_id as usize;
             if inner.deleted.contains(&internal_id) {
                 continue;
             }
             if let Some(id) = inner.ids.get(internal_id) {
-                let similarity = (1.0 - neighbor.distance).clamp(-1.0, 1.0);
+                let similarity = (1.0 - distance).clamp(-1.0, 1.0);
                 results.push((id.clone(), results.len() + 1, similarity));
                 if results.len() == k {
                     break;
@@ -199,6 +184,7 @@ impl VectorIndex {
     ///
     /// El grafo es un índice derivado: cualquier fallo aquí es recuperable (la
     /// siguiente apertura lo reconstruye), así que el llamador puede ignorarlo.
+    /// Si los vectores en disco ya están al día solo se reescribe el grafo.
     pub fn dump(&self, dir: &Path, generation: u64, space_id: &str) -> crate::Result<()> {
         std::fs::create_dir_all(dir)?;
         // Invalida el volcado anterior antes de tocar sus archivos.
@@ -208,31 +194,29 @@ impl VectorIndex {
             _ => {}
         }
 
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         if inner.ids.is_empty() {
             return Ok(());
         }
-        // `file_dump` renombra a un nombre único si ya existen archivos del
-        // mismo nombre (p. ej. en un grafo recargado), así que se vuelca en un
-        // subdirectorio vacío y luego se mueven los archivos sobre los viejos.
+        // Se escribe en un subdirectorio y se mueve sobre los archivos viejos
+        // por rename: así un fallo a medias no deja un volcado a medio escribir
+        // con la apariencia de válido (el meta, que es lo que lo valida, va el último).
         let staging = dir.join("staging");
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)?;
-        let dumped = catch_unwind(AssertUnwindSafe(|| {
-            inner.hnsw.file_dump(&staging, GRAPH_BASENAME)
-        }));
-        let outcome = match dumped {
-            Ok(Ok(basename)) if basename == GRAPH_BASENAME => {
-                move_dump_files(&staging, dir).map_err(crate::IndexError::from)
+        let outcome = (|| -> std::io::Result<()> {
+            inner.graph.write_graph(&staging.join(GRAPH_FILE))?;
+            let write_vectors = !inner.graph.vectors_clean() || !dir.join(DATA_FILE).exists();
+            if write_vectors {
+                inner.graph.write_vectors(&staging.join(DATA_FILE))?;
+                std::fs::rename(staging.join(DATA_FILE), dir.join(DATA_FILE))?;
             }
-            Ok(Ok(other)) => Err(crate::IndexError::Storage(format!(
-                "hnsw dump used unexpected basename {other}"
-            ))),
-            Ok(Err(error)) => Err(crate::IndexError::Storage(error.to_string())),
-            Err(_) => Err(crate::IndexError::Storage("hnsw dump panicked".into())),
-        };
+            std::fs::rename(staging.join(GRAPH_FILE), dir.join(GRAPH_FILE))?;
+            Ok(())
+        })();
         let _ = std::fs::remove_dir_all(&staging);
         outcome?;
+        inner.graph.mark_vectors_persisted();
 
         let meta = DumpMeta {
             version: GRAPH_DUMP_VERSION,
@@ -241,8 +225,8 @@ impl VectorIndex {
             dimension: self.dimension,
             ids: inner.ids.clone(),
             deleted: inner.deleted.iter().copied().collect(),
-            graph_len: std::fs::metadata(dump_file(dir, "hnsw.graph"))?.len(),
-            data_len: std::fs::metadata(dump_file(dir, "hnsw.data"))?.len(),
+            graph_len: std::fs::metadata(dir.join(GRAPH_FILE))?.len(),
+            data_len: std::fs::metadata(dir.join(DATA_FILE))?.len(),
         };
         let temp = meta_path.with_extension("meta.tmp");
         std::fs::write(&temp, bincode::serialize(&meta)?)?;
@@ -255,34 +239,22 @@ impl VectorIndex {
     /// Devuelve `None` ante cualquier duda (archivos ausentes, otra generación,
     /// otro espacio, truncados o ilegibles): el llamador reconstruye desde los
     /// documentos, que son la fuente de verdad.
-    pub fn load(
-        dir: &Path,
-        dimension: usize,
-        generation: u64,
-        space_id: &str,
-        expected_live: usize,
-    ) -> Option<Self> {
+    pub fn load(dir: &Path, dimension: usize, generation: u64, space_id: &str) -> Option<Self> {
         let raw = std::fs::read(dir.join(GRAPH_META_FILE)).ok()?;
         let meta: DumpMeta = bincode::deserialize(&raw).ok()?;
-        let live = meta.ids.len().checked_sub(meta.deleted.len())?;
+        let graph_path: PathBuf = dir.join(GRAPH_FILE);
+        let data_path: PathBuf = dir.join(DATA_FILE);
         if meta.version != GRAPH_DUMP_VERSION
             || meta.generation != generation
             || meta.space_id != space_id
             || meta.dimension != dimension
-            || live != expected_live
-            || std::fs::metadata(dump_file(dir, "hnsw.graph")).ok()?.len() != meta.graph_len
-            || std::fs::metadata(dump_file(dir, "hnsw.data")).ok()?.len() != meta.data_len
+            || std::fs::metadata(&graph_path).ok()?.len() != meta.graph_len
+            || std::fs::metadata(&data_path).ok()?.len() != meta.data_len
         {
             return None;
         }
-
-        // `load_hnsw` toma prestado el `HnswIo`; se filtra (unos bytes, sin mmap)
-        // para obtener un grafo `'static`.
-        let io: &'static mut HnswIo = Box::leak(Box::new(HnswIo::new(dir, GRAPH_BASENAME)));
-        // El `Option` fuerza a mover (no reborrow) la referencia `'static`.
-        let mut slot = Some(io);
-        let hnsw = catch_unwind(AssertUnwindSafe(|| load_static(slot.take()?))).ok()??;
-        if hnsw.get_nb_point() != meta.ids.len() {
+        let graph = Graph::read(&graph_path, &data_path, dimension)?;
+        if graph.len() != meta.ids.len() || meta.deleted.iter().any(|&d| d >= meta.ids.len()) {
             return None;
         }
 
@@ -295,8 +267,8 @@ impl VectorIndex {
             .map(|(internal_id, id)| (id.clone(), internal_id))
             .collect();
         Some(Self {
-            inner: Mutex::new(Inner {
-                hnsw,
+            inner: RwLock::new(Inner {
+                graph,
                 ids: meta.ids,
                 latest,
                 deleted,
@@ -306,12 +278,12 @@ impl VectorIndex {
     }
 
     pub fn should_compact(&self) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read().unwrap();
         inner.deleted.len() >= 1_024 && inner.deleted.len().saturating_mul(4) >= inner.ids.len()
     }
 
     pub fn stats(&self) -> (usize, usize) {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read().unwrap();
         (inner.latest.len(), inner.deleted.len())
     }
 }

@@ -2,7 +2,7 @@ use crate::hnsw::{MAX_VECTOR_DIMENSION, VectorIndex, cosine_similarity, validate
 use crate::rrf::rrf;
 use crate::text::TextIndex;
 use crate::types::{Fusion, Hit, HybridQuery, IndexDoc, ScalarFilter, VectorConfig};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,8 @@ const GENERATION_KEY: &str = "generation";
 const STORE_FILE: &str = "semantic.redb";
 const DATABASE_META_FILE: &str = "meta.json";
 const GRAPH_DIR: &str = "hnsw";
+/// Generación con la que se cerró limpiamente el índice de texto (`fts/`).
+const FTS_MARKER_FILE: &str = "fts.generation";
 const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,6 +64,12 @@ impl SemanticStore {
             .map_err(storage_error)?
             .map(|value| value.value())
             .unwrap_or(0))
+    }
+
+    fn doc_count(&self) -> crate::Result<u64> {
+        let txn = self.db.begin_read().map_err(storage_error)?;
+        let docs = txn.open_table(DOCS).map_err(storage_error)?;
+        docs.len().map_err(storage_error)
     }
 
     fn load_all(&self) -> crate::Result<Vec<IndexDoc>> {
@@ -202,27 +210,47 @@ impl SemanticIndex {
         let fts_dir = base.join("fts");
         std::fs::create_dir_all(&fts_dir)?;
         let store = SemanticStore::open(base)?;
-        let documents = store.load_all()?;
-        validate_documents(&documents, vector_config.as_ref())?;
         let generation = store.generation()?;
-        let text = TextIndex::open(fts_dir)?;
-        text.clear()?;
-        text.upsert_batch(&documents)?;
         let graph_dir = base.join(GRAPH_DIR);
-        let expected_live = documents.iter().filter(|doc| doc.vector.is_some()).count();
-        let loaded = vector_config.as_ref().and_then(|config| {
-            VectorIndex::load(
-                &graph_dir,
-                config.dimension,
-                generation,
-                &config.space_id,
-                expected_live,
-            )
+
+        // Camino rápido: si el cierre anterior dejó el índice de texto y el
+        // grafo ANN al día con esta generación, no hace falta leer ni un
+        // documento. El marcador se borra al abrir y se reescribe al cerrar:
+        // un fallo a mitad de sesión lo deja ausente y se reconstruye todo.
+        let fts_marker = base.join(FTS_MARKER_FILE);
+        let marked = read_fts_marker(&fts_marker);
+        let _ = std::fs::remove_file(&fts_marker);
+        let text = TextIndex::open(fts_dir)?;
+        let fts_ready = marked == Some(generation) && text.num_docs()? == store.doc_count()?;
+        let mut loaded = vector_config.as_ref().and_then(|config| {
+            VectorIndex::load(&graph_dir, config.dimension, generation, &config.space_id)
         });
+
+        let documents = if fts_ready && (loaded.is_some() || vector_config.is_none()) {
+            None
+        } else {
+            let documents = store.load_all()?;
+            validate_documents(&documents, vector_config.as_ref())?;
+            if !fts_ready {
+                text.clear()?;
+                text.upsert_batch(&documents)?;
+            }
+            // Defensa extra: el grafo restaurado debe tener tantos vectores
+            // vivos como documentos con vector.
+            let expected_live = documents.iter().filter(|doc| doc.vector.is_some()).count();
+            if loaded
+                .as_ref()
+                .is_some_and(|index| index.stats().0 != expected_live)
+            {
+                loaded = None;
+            }
+            Some(documents)
+        };
         let graph_saved = loaded.is_some();
-        let vector = match loaded {
-            Some(index) => Some(index),
-            None => build_vector_index(vector_config.as_ref(), &documents)?,
+        let vector = match (loaded, documents) {
+            (Some(index), _) => Some(index),
+            (None, Some(documents)) => build_vector_index(vector_config.as_ref(), &documents)?,
+            (None, None) => None,
         };
 
         Ok(Self {
@@ -274,12 +302,10 @@ impl SemanticIndex {
         }
         let mut state = self.state.write().unwrap();
         let generation = self.store.upsert_batch(docs)?;
-        let update = state.text.upsert_batch(docs).and_then(|()| {
-            for doc in docs {
-                sync_vector(state.vector.as_ref(), doc)?;
-            }
-            Ok(())
-        });
+        let update = state
+            .text
+            .upsert_batch(docs)
+            .and_then(|()| sync_vectors(state.vector.as_ref(), docs));
         self.finish_update(&mut state, generation, update)
     }
 
@@ -467,6 +493,24 @@ impl SemanticIndex {
         Ok(())
     }
 
+    /// Marca el índice de texto como al día con la generación actual para que
+    /// la próxima apertura no lo reconstruya. Solo se llama al cerrar.
+    fn persist_text_marker(&self) -> crate::Result<()> {
+        let Some(graph_dir) = self.graph_dir.as_ref() else {
+            return Ok(());
+        };
+        let state = self.state.read().unwrap();
+        if state.generation != self.store.generation()? {
+            return Ok(());
+        }
+        let base = graph_dir.parent().unwrap_or(graph_dir);
+        let marker = base.join(FTS_MARKER_FILE);
+        let temp = marker.with_extension("tmp");
+        std::fs::write(&temp, state.generation.to_le_bytes())?;
+        std::fs::rename(&temp, &marker)?;
+        Ok(())
+    }
+
     /// `true` si el volcado del grafo ANN en disco coincide con el de memoria
     /// (se restauró al abrir o se volcó desde entonces).
     pub fn vector_graph_persisted(&self) -> bool {
@@ -489,9 +533,15 @@ impl SemanticIndex {
 
 impl Drop for SemanticIndex {
     fn drop(&mut self) {
-        // Mejor esfuerzo: si falla, la próxima apertura reconstruye el grafo.
+        // Mejor esfuerzo: si falla, la próxima apertura reconstruye.
         let _ = self.persist_vector_graph();
+        let _ = self.persist_text_marker();
     }
+}
+
+fn read_fts_marker(path: &Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(u64::from_le_bytes(bytes.try_into().ok()?))
 }
 
 fn validate_config(config: Option<&VectorConfig>) -> crate::Result<()> {
@@ -587,6 +637,27 @@ fn build_vector_index(
         .collect();
     index.rebuild(vectors)?;
     Ok(Some(index))
+}
+
+/// Aplica un lote al índice vectorial conservando el orden: los documentos
+/// consecutivos con vector se insertan juntos (en paralelo si el lote es
+/// grande) y uno sin vector borra el anterior antes de seguir.
+fn sync_vectors(vector: Option<&VectorIndex>, docs: &[IndexDoc]) -> crate::Result<()> {
+    let Some(index) = vector else {
+        return docs.iter().try_for_each(|doc| sync_vector(None, doc));
+    };
+    let mut pending: Vec<(&str, &[f32])> = Vec::new();
+    for doc in docs {
+        match doc.vector.as_deref() {
+            Some(v) => pending.push((doc.id.as_str(), v)),
+            None => {
+                index.insert_many(&pending)?;
+                pending.clear();
+                index.delete(&doc.id)?;
+            }
+        }
+    }
+    index.insert_many(&pending)
 }
 
 fn sync_vector(vector: Option<&VectorIndex>, doc: &IndexDoc) -> crate::Result<()> {

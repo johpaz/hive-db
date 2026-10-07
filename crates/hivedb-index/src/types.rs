@@ -142,7 +142,7 @@ pub struct HybridQuery {
     /// Full-text query passed to `tantivy` BM25. Parsed leniently: raw user
     /// input never fails the query.
     pub text: Option<String>,
-    /// Vector query passed to `hnsw_rs` ANN.
+    /// Vector query passed to the ANN (HNSW) index.
     pub vector: Option<Vec<f32>>,
     /// Scalar filters applied to both text and vector results.
     pub filters: Vec<ScalarFilter>,

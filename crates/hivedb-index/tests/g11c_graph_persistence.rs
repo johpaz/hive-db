@@ -181,3 +181,77 @@ fn sin_vectores_no_hay_volcado() {
     }
     assert!(!dir.path().join("hnsw").exists());
 }
+
+fn text_ids(index: &SemanticIndex, text: &str) -> Vec<String> {
+    let mut ids: Vec<String> = index
+        .query_hybrid(HybridQuery::default().with_text(text).with_k(50))
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn indice_de_texto_se_restaura_sin_reconstruir() {
+    let dir = tempfile::tempdir().unwrap();
+    populate(dir.path(), 60);
+    // El marcador solo existe tras un cierre limpio.
+    assert!(dir.path().join("fts.generation").exists());
+
+    let reopened = SemanticIndex::open(dir.path(), config()).unwrap();
+    // Al abrir se invalida: si el proceso muriera ahora, no quedaría marcador.
+    assert!(!dir.path().join("fts.generation").exists());
+    assert!(reopened.vector_graph_persisted());
+    assert_eq!(text_ids(&reopened, "7"), vec!["d7".to_string()]);
+    assert_eq!(top(&reopened, 3)[0], "d3");
+}
+
+#[test]
+fn cierre_sucio_reconstruye_el_texto_y_ve_las_escrituras_nuevas() {
+    let dir = tempfile::tempdir().unwrap();
+    populate(dir.path(), 20);
+    let marcador_viejo = std::fs::read(dir.path().join("fts.generation")).unwrap();
+
+    {
+        let index = SemanticIndex::open(dir.path(), config()).unwrap();
+        index
+            .upsert(
+                &IndexDoc::new("nuevo")
+                    .with_body("palabraunica")
+                    .with_vector(vector(99)),
+            )
+            .unwrap();
+    }
+    // Simula un crash tras escribir: el marcador es el de antes de la sesión.
+    std::fs::write(dir.path().join("fts.generation"), marcador_viejo).unwrap();
+
+    let reopened = SemanticIndex::open(dir.path(), config()).unwrap();
+    assert_eq!(
+        text_ids(&reopened, "palabraunica"),
+        vec!["nuevo".to_string()]
+    );
+    assert_eq!(top(&reopened, 99)[0], "nuevo");
+}
+
+#[test]
+fn marcador_de_otra_generacion_obliga_a_reconstruir() {
+    let dir = tempfile::tempdir().unwrap();
+    populate(dir.path(), 20);
+    std::fs::write(dir.path().join("fts.generation"), 9_999u64.to_le_bytes()).unwrap();
+
+    let reopened = SemanticIndex::open(dir.path(), config()).unwrap();
+    assert_eq!(text_ids(&reopened, "5"), vec!["d5".to_string()]);
+    assert_eq!(text_ids(&reopened, "19"), vec!["d19".to_string()]);
+}
+
+#[test]
+fn indice_de_texto_borrado_con_marcador_valido_se_reconstruye() {
+    let dir = tempfile::tempdir().unwrap();
+    populate(dir.path(), 20);
+    std::fs::remove_dir_all(dir.path().join("fts")).unwrap();
+
+    let reopened = SemanticIndex::open(dir.path(), config()).unwrap();
+    assert_eq!(text_ids(&reopened, "5"), vec!["d5".to_string()]);
+}
