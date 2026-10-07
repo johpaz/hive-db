@@ -12,6 +12,15 @@ pub const MAX_VECTOR_DIMENSION: usize = 65_536;
 /// `ef` de búsqueda HNSW por defecto. Con 50 el recall@10 era 0,27 (aleatorio)
 /// y 0,73 (agrupado) en 10k docs; con 200 sube a 0,62 y 0,87.
 pub const DEFAULT_EF_SEARCH: usize = 200;
+/// Vecinos por nodo y capa. 24 sube mucho el recall frente a 16 con poco coste.
+const HNSW_M: usize = 24;
+/// Pista de capacidad para `hnsw_rs`; no es un límite duro.
+const MAX_ELEMENTS: usize = 100_000;
+/// `hnsw_rs` lo recorta a su máximo interno (16).
+const HNSW_MAX_LAYER: usize = 16;
+/// Candidatos explorados al insertar. Con 16 (valor erróneo anterior, por
+/// argumentos mal ordenados) el recall a 100k era ~0,43 con `ef=200`.
+const HNSW_EF_CONSTRUCTION: usize = 100;
 
 const GRAPH_BASENAME: &str = "vectors";
 const GRAPH_META_FILE: &str = "vectors.meta";
@@ -60,7 +69,13 @@ struct Inner {
 impl Inner {
     fn new() -> Self {
         Self {
-            hnsw: Hnsw::new(16, 100_000, 200, 16, DistCosine),
+            hnsw: Hnsw::new(
+                HNSW_M,
+                MAX_ELEMENTS,
+                HNSW_MAX_LAYER,
+                HNSW_EF_CONSTRUCTION,
+                DistCosine,
+            ),
             ids: Vec::new(),
             latest: HashMap::new(),
             deleted: HashSet::new(),

@@ -1,0 +1,58 @@
+# Barrido de construcción del HNSW (100k, 50 clusters). M y ef_construction por TMP_M/TMP_EFC (override temporal ya eliminado)
+== M=16 efc=16
+ef=100 recall_at_10=0.3780 vector_p50_us=1031 vector_p99_us=2146
+ef=200 recall_at_10=0.4652 vector_p50_us=1618 vector_p99_us=3696
+ef=400 recall_at_10=0.5592 vector_p50_us=2546 vector_p99_us=6189
+ef=800 recall_at_10=0.6624 vector_p50_us=4419 vector_p99_us=9827
+ingesta_docs_por_s=3281
+arranque_en_frio_ms=1854 vectores_vivos=100000
+disco_mib=473.1
+== M=16 efc=200
+ef=100 recall_at_10=0.7641 vector_p50_us=1533 vector_p99_us=4277
+ef=200 recall_at_10=0.8956 vector_p50_us=1779 vector_p99_us=5097
+ef=400 recall_at_10=0.9640 vector_p50_us=2361 vector_p99_us=7296
+ef=800 recall_at_10=0.9762 vector_p50_us=3564 vector_p99_us=9217
+ingesta_docs_por_s=520
+arranque_en_frio_ms=2129 vectores_vivos=100000
+disco_mib=484.3
+== M=24 efc=200
+ef=100 recall_at_10=0.9646 vector_p50_us=1538 vector_p99_us=4013
+ef=200 recall_at_10=0.9849 vector_p50_us=2047 vector_p99_us=4852
+ef=400 recall_at_10=0.9882 vector_p50_us=2886 vector_p99_us=6720
+ef=800 recall_at_10=0.9915 vector_p50_us=4816 vector_p99_us=10253
+ingesta_docs_por_s=381
+arranque_en_frio_ms=2150 vectores_vivos=100000
+disco_mib=501.9
+== M=32 efc=200
+ef=100 recall_at_10=0.9807 vector_p50_us=1738 vector_p99_us=3260
+ef=200 recall_at_10=0.9887 vector_p50_us=2287 vector_p99_us=3681
+ef=400 recall_at_10=0.9909 vector_p50_us=3294 vector_p99_us=4910
+ef=800 recall_at_10=0.9932 vector_p50_us=5658 vector_p99_us=10533
+ingesta_docs_por_s=313
+arranque_en_frio_ms=2284 vectores_vivos=100000
+disco_mib=512.7
+
+[exited with code 144]
+== M=16 efc=64
+ef=50 recall_at_10=0.4927 vector_p50_us=823 vector_p99_us=1712
+ef=100 recall_at_10=0.6247 vector_p50_us=1122 vector_p99_us=2714
+ef=200 recall_at_10=0.7528 vector_p50_us=1585 vector_p99_us=4577
+ef=400 recall_at_10=0.8482 vector_p50_us=2097 vector_p99_us=6949
+ingesta_docs_por_s=1164
+disco_mib=475.0
+== M=24 efc=64
+ef=50 recall_at_10=0.6703 vector_p50_us=977 vector_p99_us=2350
+ef=100 recall_at_10=0.8322 vector_p50_us=1320 vector_p99_us=3744
+ef=200 recall_at_10=0.9263 vector_p50_us=1791 vector_p99_us=5336
+ef=400 recall_at_10=0.9612 vector_p50_us=2289 vector_p99_us=7109
+ingesta_docs_por_s=961
+disco_mib=487.1
+== M=24 efc=100
+ef=50 recall_at_10=0.7239 vector_p50_us=1075 vector_p99_us=2532
+ef=100 recall_at_10=0.8889 vector_p50_us=1492 vector_p99_us=4049
+ef=200 recall_at_10=0.9655 vector_p50_us=1882 vector_p99_us=5422
+ef=400 recall_at_10=0.9800 vector_p50_us=2499 vector_p99_us=6795
+ingesta_docs_por_s=711
+disco_mib=495.4
+
+[exited with code 0]

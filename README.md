@@ -59,14 +59,16 @@ reales son las capas de memoria para agentes y los motores vectoriales embebidos
 
 | | Vector p50 | recall@10 | Arranque en frío | Disco | Búsqueda híbrida |
 |---|---:|---:|---:|---:|:---:|
-| **HiveDB** (HNSW) | 1,7 ms | 0,42 | 1,9 s | 474 MiB | Sí (2,8 ms p50) |
+| **HiveDB** (HNSW) | 2,0 ms | 0,96 | 2,1 s | 495 MiB | Sí (3,0 ms p50) |
 | sqlite-vec (exacto) | 65,5 ms | 1,00 | 67 ms | 149 MiB | No |
 | LanceDB (exacto) | 162,2 ms | 1,00 | 190 ms | 147 MiB | No |
-| LanceDB (IVF_HNSW_SQ) | 1,8 ms | 0,51 | 79 ms | 203 MiB | No |
+| LanceDB (IVF_HNSW_SQ, ajustado) | 2,4 ms | 0,95 | 79 ms | 203 MiB | No |
 
-Honestidad por delante: HiveDB es rápido en búsqueda aproximada, pero hoy **arranca más
-lento, ocupa más disco, ingiere más despacio y tiene peor recall que LanceDB HNSW** en estos
-datos. Está en la lista de mejoras de `docs/BENCHMARKS.md`.
+A igual recall, la búsqueda vectorial de HiveDB y la de LanceDB ajustado están en el mismo
+orden de magnitud. Honestidad por delante: HiveDB **arranca más lento (2,1 s frente a
+~0,1 s), ocupa más disco (~2,5×) e ingiere mucho más despacio (~0,7k docs/s)**, y su p99 es
+peor. A cambio ofrece el log causal, el consentimiento y la búsqueda híbrida que los otros
+no tienen. Detalle, curvas de `ef` y mejoras pendientes en `docs/BENCHMARKS.md`.
 
 **Comparación cualitativa** (no medida; según la documentación pública de cada proyecto):
 

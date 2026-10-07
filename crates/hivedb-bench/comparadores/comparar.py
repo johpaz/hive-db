@@ -102,7 +102,15 @@ class LanceDB:
         self.tabla = lancedb.connect(ruta).open_table("t")
 
     def consultar(self, q):
-        filas = self.tabla.search(q).metric("cosine").limit(K).select(["id"]).to_list()
+        # LANCE_NPROBES / LANCE_EF / LANCE_REFINE ajustan la búsqueda (por defecto, los de LanceDB).
+        busqueda = self.tabla.search(q).metric("cosine").limit(K).select(["id"])
+        if os.environ.get("LANCE_NPROBES"):
+            busqueda = busqueda.nprobes(int(os.environ["LANCE_NPROBES"]))
+        if os.environ.get("LANCE_EF"):
+            busqueda = busqueda.ef(int(os.environ["LANCE_EF"]))
+        if os.environ.get("LANCE_REFINE"):
+            busqueda = busqueda.refine_factor(int(os.environ["LANCE_REFINE"]))
+        filas = busqueda.to_list()
         return [f["id"] for f in filas]
 
 
