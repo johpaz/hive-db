@@ -83,11 +83,21 @@ impl VectorIndex {
     where
         I: IntoIterator<Item = (&'a str, &'a [f32])>,
     {
+        // Los ids internos se asignan en orden; la inserción en el grafo es
+        // paralela (`hnsw_rs` la soporta), que es lo que domina el arranque.
         let mut rebuilt = Inner::new();
+        let mut batch: Vec<(&[f32], usize)> = Vec::new();
         for (id, vector) in vectors {
             validate_vector(vector, self.dimension)?;
-            rebuilt.insert(id.to_string(), vector);
+            if let Some(old) = rebuilt.latest.get(id) {
+                rebuilt.deleted.insert(*old);
+            }
+            let internal_id = rebuilt.ids.len();
+            rebuilt.latest.insert(id.to_string(), internal_id);
+            rebuilt.ids.push(id.to_string());
+            batch.push((vector, internal_id));
         }
+        rebuilt.hnsw.parallel_insert_slice(&batch);
         *self.inner.lock().unwrap() = rebuilt;
         Ok(())
     }

@@ -143,6 +143,32 @@ fn us(d: Duration) -> u128 {
     d.as_micros()
 }
 
+/// recall@K del camino vectorial frente a fuerza bruta (coseno = producto
+/// punto, los vectores están normalizados).
+fn recall_at_k(
+    index: &SemanticIndex,
+    vectores: &[Vec<f32>],
+    consultas: &[Vec<f32>],
+) -> Result<f64, Box<dyn std::error::Error>> {
+    let mut aciertos = 0usize;
+    for q in consultas {
+        let mut exacto: Vec<(usize, f32)> = vectores
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, dot(q, v)))
+            .collect();
+        exacto.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let verdad: Vec<String> = exacto
+            .iter()
+            .take(K)
+            .map(|(i, _)| format!("doc-{i}"))
+            .collect();
+        let hits = index.query_hybrid(HybridQuery::default().with_vector(q.clone()).with_k(K))?;
+        aciertos += hits.iter().filter(|h| verdad.contains(&h.id)).count();
+    }
+    Ok(aciertos as f64 / (consultas.len() * K) as f64)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let docs: usize = args
@@ -203,25 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         index.query_hybrid(q).expect("hibrida");
     });
 
-    // recall@K del camino vectorial frente a fuerza bruta (coseno = producto
-    // punto, los vectores están normalizados).
-    let mut aciertos = 0usize;
-    for q in &consultas_vec {
-        let mut exacto: Vec<(usize, f32)> = vectores
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (i, dot(q, v)))
-            .collect();
-        exacto.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let verdad: Vec<String> = exacto
-            .iter()
-            .take(K)
-            .map(|(i, _)| format!("doc-{i}"))
-            .collect();
-        let hits = index.query_hybrid(HybridQuery::default().with_vector(q.clone()).with_k(K))?;
-        aciertos += hits.iter().filter(|h| verdad.contains(&h.id)).count();
-    }
-    let recall = aciertos as f64 / (consultas * K) as f64;
+    let recall = recall_at_k(&index, &vectores, &consultas_vec)?;
 
     let rss_poblado = rss_mib();
     drop(index);
@@ -231,6 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reabierto = SemanticIndex::open(dir.path(), config)?;
     let arranque = t.elapsed();
     let vivos = reabierto.vector_stats().map_or(0, |s| s.0);
+    let recall_reabierto = recall_at_k(&reabierto, &vectores, &consultas_vec)?;
 
     println!("# hivedb-bench docs={docs} consultas={consultas} dim={DIMENSION} k={K}");
     println!(
@@ -241,6 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("texto_p50_us={} texto_p99_us={}", us(t50), us(t99));
     println!("hibrida_p50_us={} hibrida_p99_us={}", us(h50), us(h99));
     println!("recall_at_{K}={recall:.4}");
+    println!("recall_at_{K}_tras_reabrir={recall_reabierto:.4}");
     println!(
         "arranque_en_frio_ms={} vectores_vivos={vivos}",
         arranque.as_millis()
