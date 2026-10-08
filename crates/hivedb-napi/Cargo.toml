@@ -14,18 +14,14 @@ crate-type = ["cdylib"]
 [features]
 # Embedder local (multilingual-e5-small sobre candle). Apagado por defecto: añade
 # el motor de inferencia al binario nativo.
-embedder-local = ["dep:hivedb-embed"]
+embedder-local = ["hivedb-binding-core/embedder-local"]
 
 [dependencies]
-hivedb-core = { path = "../hivedb-core" }
-hivedb-embed = { path = "../hivedb-embed", optional = true }
-hivedb-index = { path = "../hivedb-index" }
+hivedb-binding-core = { path = "../hivedb-binding-core" }
 napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
 napi-derive = "3"
-serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
-uuid = { workspace = true }
 
 [build-dependencies]
 napi-build = "2"

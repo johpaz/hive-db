@@ -18,9 +18,13 @@ hive-db/
 │   ├── hivedb-index/          # índice semántico híbrido
 │   ├── hivedb-embed/          # embedder local opcional (candle) y descarga del modelo
 │   ├── hivedb-bench/          # benchmarks reproducibles (publish = false)
-│   └── hivedb-napi/           # binding napi-rs (cdylib)
+│   ├── hivedb-binding-core/   # lógica común de los bindings: DTOs, validación, errores con código
+│   ├── hivedb-napi/           # binding napi-rs (cdylib) — Node/Bun
+│   └── hivedb-py/             # binding PyO3 (cdylib `_native`, abi3) — Python
 └── packages/
-    └── hive-db/               # envoltorio TypeScript para Bun
+    ├── hive-db/               # envoltorio TypeScript para Bun
+    ├── hive-db-py/            # paquete Python `johpaz-hive-db` (maturin + capa pura Python)
+    └── langchain-hivedb/      # adaptadores LangChain/LangGraph (Python puro)
 ```
 
 | Crate / Paquete | Responsabilidad | Tecnologías clave |
@@ -29,8 +33,12 @@ hive-db/
 | `hivedb-index` | BM25 full-text (`tantivy`), ANN vectorial (HNSW propio), fusión RRF | `tantivy`, `rayon`, `memmap2` |
 | `hivedb-embed` | Embedder local (`multilingual-e5-small`) y descarga/caché verificada del modelo | `candle`, `tokenizers`, `ureq`, `sha2` |
 | `hivedb-bench` | Benchmarks y comparadores (sqlite-vec, LanceDB, libSQL) | — |
-| `hivedb-napi` | Expone `HiveDB` al runtime JS vía napi-rs | `napi`, `napi-derive`, `tokio` |
+| `hivedb-binding-core` | Todo lo que no depende del lenguaje anfitrión: DTOs planos, validación de eventos/patrones/consultas, apertura, candado lectura/escritura, errores con código | `serde`, `serde_json` |
+| `hivedb-napi` | Expone `HiveDB` al runtime JS vía napi-rs (solo conversiones Js* ↔ DTO) | `napi`, `napi-derive`, `tokio` |
+| `hivedb-py` | Expone `HiveDB` a Python vía PyO3 (solo conversiones `dict` ↔ DTO) | `pyo3`, `pythonize` |
 | `@johpaz/hive-db` | API ergonómica TypeScript, async iterators, tipos | Bun |
+| `johpaz-hive-db` (PyPI) | API Python síncrona y `AsyncHiveDB`, dataclasses, stubs | `maturin` |
+| `johpaz-langchain-hivedb` | `VectorStore`, historial de chat y `BaseStore` de LangGraph sobre HiveDB | `langchain-core`, `langgraph-checkpoint` |
 
 ---
 
@@ -144,6 +152,45 @@ No expongas `seq` ni `timestamp` en `EventInput`. Hay un test `compile_fail` (`t
 ### En el binding napi
 
 `JsHiveDB::subscribe` lanza una tarea `tokio` que lee del `Subscription` y llama a `ThreadsafeFunction` en modo no bloqueante. La callback JS recibe `(err, event)`.
+
+### En el binding Python
+
+`hivedb._native.Subscription` arranca un hilo con un runtime `tokio` de un solo hilo que consume el `Subscription` y reenvía los eventos por un canal `std::sync::mpsc`; `next(timeout)` espera en ese canal **sin el GIL** y comprueba las señales (Ctrl-C) cada 100 ms. `close()` (o soltar el objeto) detiene el hilo con un `oneshot`.
+
+---
+
+## 6b. Bindings: un núcleo común y dos envoltorios
+
+`hivedb-binding-core` concentra lo que no depende del lenguaje anfitrión para que Node y Python validen y
+respondan **igual** (mismos mensajes, mismos códigos):
+
+- **DTOs planos** (`EventInputDto`, `HybridQueryDto`, `IndexDocDto`, `DocEntryDto`…) con `serde`, en
+  `snake_case`. Cada binding solo convierte sus tipos nativos (`Js*` en napi, `dict` vía `pythonize` en PyO3).
+- **Validación**: `EventInputDto::into_core` (campos obligatorios por tipo de evento, UUID de `correlation`),
+  `EventPatternDto::into_core` (predicados), `HybridQueryDto::into_core` (fusión `rrf` con `k = 60`,
+  boosts), `ColOpDto` (lotes).
+- **`Handle`**: la base abierta tras un `RwLock<Option<Arc<HiveDB>>>`. Las operaciones toman el candado de
+  lectura (consultas concurrentes sobre la misma base); `close()` toma el de escritura, espera a las
+  operaciones en curso y es idempotente; después todo devuelve `database is closed`.
+- **Errores con código**: `BindingError { code: Option<ErrorCode>, message }`. El código se detecta por el
+  prefijo `CODIGO:` que ya llevan los mensajes de `hivedb-index` (`INVALID_VECTOR`, `VECTOR_SPACE_MISMATCH`,
+  `INDEX_DEGRADED`, `EMBEDDER_UNAVAILABLE`), así que el texto no cambia. napi lo conserva como prefijo del
+  mensaje (el TS lo convierte en `HiveDBError`); PyO3 crea `HiveDBError` con el atributo `.code`.
+- **Embedder**: `resolve_embedder` / `local_embedder` / `prepare_embedder` son **bloqueantes** (descargan y
+  cargan el modelo; `LocalEmbedder::shared` mantiene una sola copia por proceso). napi los llama dentro de
+  `spawn_blocking`; Python los llama sin el GIL (y `prepare_embedder` corre en un hilo para poder invocar
+  el callback de progreso con el GIL desde el hilo que llama).
+
+**Python y el GIL.** `hivedb-py` es síncrono: cada método de `Database` ejecuta el trabajo del motor dentro de
+`py.detach(...)`, así que varios hilos de Python consultan en paralelo (medido: 16 consultas con embedding
+sobre una base, 146 ms en 16 hilos frente a 751 ms en serie; 815 MiB con 4 bases, igual que en Node).
+`AsyncHiveDB` envuelve cada llamada con `asyncio.to_thread`. El módulo se compila con `abi3-py39` (una wheel por
+plataforma) y con `test = false`: no se enlaza contra `libpython` y se prueba con `pytest`
+(`packages/hive-db-py/tests`). Los tipos públicos (dataclasses) y las conversiones están en la capa Python
+(`python/hivedb/types.py`, `_convert.py`).
+
+**Añadir una operación nueva al motor** implica: método en `Handle` (y DTOs si hacen falta), y una línea de
+conversión en `hivedb-napi` y otra en `hivedb-py`, más los tests de ambos lados.
 
 ---
 
@@ -267,9 +314,11 @@ disco real: `/tmp` suele ser `tmpfs`).
 ### Análisis de texto
 
 `text.rs` analiza (al indexar y al consultar) con: `SimpleTokenizer` → minúsculas → **palabras vacías del
-español** → **palabras vacías del inglés** → plegado de acentos → stemmer español. Las listas de palabras
-vacías (feature `stopwords` de tantivy) van **antes** del plegado porque están escritas con acentos
-(«más», «está»). Los catálogos son bilingües, de ahí las dos listas.
+español** → **interrogativas con acento** (`ACCENTED_QUESTION_WORDS`) → **palabras vacías del inglés** →
+plegado de acentos → stemmer español. Las listas de palabras vacías (feature `stopwords` de tantivy) van
+**antes** del plegado porque están escritas con acentos («más», «está»). Los catálogos son bilingües, de ahí
+las dos listas. La lista española oficial solo trae «como», «cual», «donde»… sin acento; como el filtro va
+antes del plegado, «cómo», «cuál», «dónde», «cuándo», «quién»… se quitaban a mano (versión de análisis 3).
 
 Por qué importa: en la fusión RRF una coincidencia de texto vale por su posición, no por su puntuación; si
 «de» o «the» casan, cualquier documento que los contenga obtiene un primer puesto de texto y puede

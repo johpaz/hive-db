@@ -1,0 +1,21 @@
+[package]
+name = "hivedb-binding-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Lógica común de los bindings de HiveDB (Node y Python): DTOs, validación y errores con código."
+
+[features]
+# Embedder local (multilingual-e5-small sobre candle).
+embedder-local = ["dep:hivedb-embed"]
+
+[dependencies]
+hivedb-core = { path = "../hivedb-core" }
+hivedb-embed = { path = "../hivedb-embed", optional = true }
+hivedb-index = { path = "../hivedb-index" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

@@ -304,8 +304,12 @@ comparten una base y los grandes tienen la suya.
 
 Límites que conviene saber:
 - Una base solo la abre un proceso a la vez: el servicio que atiende a los usuarios es el dueño de las bases.
-- El motor es una librería para Bun/Node (`@johpaz/hive-db`): se integra con LangGraph.js, LangChain.js o
-  hive-sdk. No hay binding para Python, así que LangChain/LangGraph en Python no pueden usarlo directamente.
+- El motor es una librería para Bun/Node (`@johpaz/hive-db`) y para Python (`hive-db`): se integra con
+  LangGraph.js, LangChain.js, hive-sdk y, en Python, con LangChain/LangGraph mediante `johpaz-langchain-hivedb`
+  (`HiveDBStore` como memoria a largo plazo, `HiveDBVectorStore` y el historial de chat). El modelo del embedder
+  local es uno por proceso en ambos lenguajes. Lo que **no** hay todavía es un checkpointer de LangGraph
+  (`BaseCheckpointSaver`): el estado del grafo sigue en `SqliteSaver`/`InMemorySaver` y HiveDB guarda la memoria
+  que debe sobrevivir entre conversaciones.
 - Todas las bases de una aplicación usan el mismo modelo; cambiar de modelo obliga a reindexar (ver §4.4).
 
 ---

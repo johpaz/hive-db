@@ -61,6 +61,14 @@ fn build_schema() -> Schema {
     schema_builder.build()
 }
 
+/// Interrogativas con acento que la lista oficial de palabras vacías del español no trae (sí trae
+/// «como», «que», «qué», «cual», «donde»…, pero no «cómo», «cuál», «dónde», «cuándo», «quién»), y
+/// que abren casi toda pregunta en lenguaje natural: «¿cómo genero reportes?».
+const ACCENTED_QUESTION_WORDS: &[&str] = &[
+    "cómo", "cuál", "cuáles", "dónde", "adónde", "cuándo", "quién", "quiénes", "cuánto", "cuánta",
+    "cuántos", "cuántas",
+];
+
 fn build_analyzer() -> TextAnalyzer {
     // Las palabras vacías (de, la, que, the, of…) se quitan antes de plegar acentos y
     // de aplicar el stemmer, porque sus listas van sin plegar. Sin esto, una consulta
@@ -72,6 +80,9 @@ fn build_analyzer() -> TextAnalyzer {
         .filter(
             StopWordFilter::new(Language::Spanish).expect("lista de palabras vacías en español"),
         )
+        .filter(StopWordFilter::remove(
+            ACCENTED_QUESTION_WORDS.iter().map(|w| (*w).to_string()),
+        ))
         .filter(StopWordFilter::new(Language::English).expect("lista de palabras vacías en inglés"))
         .filter(AsciiFoldingFilter)
         .filter(Stemmer::new(Language::Spanish))

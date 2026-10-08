@@ -1,0 +1,30 @@
+[package]
+name = "hivedb-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Binding Python (PyO3) de HiveDB."
+
+[lib]
+# El nombre del módulo nativo es `hivedb._native` (ver packages/hive-db-py/pyproject.toml).
+name = "_native"
+crate-type = ["cdylib"]
+# El módulo no se enlaza contra libpython (lo carga el intérprete): sin arnés de tests de Rust.
+# Se prueba con pytest (packages/hive-db-py/tests).
+test = false
+doctest = false
+
+[features]
+# Embedder local (multilingual-e5-small sobre candle). Apagado por defecto.
+embedder-local = ["hivedb-binding-core/embedder-local"]
+
+[dependencies]
+hivedb-binding-core = { path = "../hivedb-binding-core" }
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+pythonize = "0.29"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt", "macros", "sync"] }

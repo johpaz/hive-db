@@ -109,6 +109,27 @@ await HiveDB.prepareEmbedder({ onProgress: (p) => console.log(p.file, p.download
 const db = await HiveDB.open("./data", { embedder: "local" });
 ```
 
+### Python (LangChain, LangGraph)
+
+```bash
+pip install johpaz-hive-db                # el motor: import hivedb
+pip install "johpaz-langchain-hivedb[langgraph]" # VectorStore, historial de chat y BaseStore de LangGraph
+```
+
+```python
+from hivedb import HiveDB
+
+with HiveDB.open("./data", embedder="local") as db:
+    db.upsert_doc("d1", body="Receta de paella valenciana")
+    print(db.query_hybrid(text="cómo cocinar arroz", k=3))
+```
+
+Mismo motor, mismas garantías y el mismo modelo local compartido por proceso; wheels para Linux
+(glibc y musl), macOS y Windows. Con LangGraph: `graph.compile(store=HiveDBStore(db))` da memoria a largo
+plazo con búsqueda por significado. Detalle en [`packages/hive-db-py`](packages/hive-db-py/README.md),
+[`packages/langchain-hivedb`](packages/langchain-hivedb/README.md) y la
+[guía](docs/USER_GUIDE.md) (§13).
+
 ## Arquitectura
 
 ```
@@ -150,7 +171,7 @@ la migración están en [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
 
 ## Estado del proyecto
 
-Versión **0.6.x**, antes de la 1.0: la API puede cambiar entre versiones menores, y el formato en
+Versión **0.6.x** (la 0.7 añade el binding de Python), antes de la 1.0: la API puede cambiar entre versiones menores, y el formato en
 disco se migra solo al abrir (una base ya migrada no se puede abrir con una versión anterior; ver
 la guía). El motor tiene tests de propiedades, de concurrencia con `loom` y de recuperación tras
 fallos a medias. El historial de hitos está en [`docs/GATES.md`](docs/GATES.md).
@@ -162,7 +183,7 @@ desde funciones de JS (APIs y servidores locales como Ollama) y estabilizar el f
 
 | | |
 |---|---|
-| [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | Guía de uso desde Bun/TypeScript, con ejemplos de cada API. |
+| [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | Guía de uso desde Bun/TypeScript (y Python, §13), con ejemplos de cada API. |
 | [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) | Manual de implementación: formato en disco, índices, recuperación, extensión del motor. |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Mediciones, metodología y cómo reproducirlas. |
 | [`docs/AFIRMACIONES.md`](docs/AFIRMACIONES.md) | Qué se puede afirmar de HiveDB (y cómo decirlo): comparación con el stack habitual, afirmaciones verificadas y texto propuesto. |
@@ -191,11 +212,17 @@ RUSTFLAGS="--cfg loom" cargo test --test g7_concurrency no_data_race_on_seq_assi
 cd packages/hive-db
 bun run build:native   # compila el binding y genera native.cjs
 bun test
+
+# Paquete Python (necesita maturin: pip install maturin pytest)
+cd packages/hive-db-py
+maturin develop --release   # compila el módulo y lo instala en el venv activo
+pytest                      # con HIVEDB_E2E_EMBEDDER=1 y HIVEDB_MODEL_DIR=... añade las pruebas con el modelo real
 ```
 
-El workspace tiene cinco crates: `hivedb-core` (log, proyecciones, reactividad, consentimiento,
+El workspace tiene siete crates: `hivedb-core` (log, proyecciones, reactividad, consentimiento,
 harness), `hivedb-index` (memoria semántica híbrida), `hivedb-embed` (embedder local opcional),
-`hivedb-napi` (binding para Bun/Node) y `hivedb-bench` (benchmarks reproducibles). Cada hito nuevo
+`hivedb-binding-core` (lógica común de los bindings), `hivedb-napi` (binding para Bun/Node),
+`hivedb-py` (binding para Python) y `hivedb-bench` (benchmarks reproducibles). Cada hito nuevo
 añade su archivo de tests `gN_*.rs`, registrado en el `Cargo.toml` del crate. Todo el tiempo pasa
 por `Clock`; no se usa `SystemTime::now()` en la lógica del motor.
 

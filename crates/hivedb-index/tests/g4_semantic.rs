@@ -699,6 +699,8 @@ fn las_palabras_vacias_no_producen_coincidencias() {
             doc("a", "receta de paella valenciana"),
             doc("b", "como configurar la cuenta de email"),
             doc("c", "the refund policy of the shop"),
+            // "Cómo" con acento: el caso real de las preguntas ("¿cómo configuro…?").
+            doc("d", "Cómo configurar el router de casa"),
         ])
         .unwrap();
     let ids = |text: &str| -> Vec<String> {
@@ -717,6 +719,10 @@ fn las_palabras_vacias_no_producen_coincidencias() {
     // Una consulta hecha solo de palabras vacías no encuentra nada (antes casaba con todo).
     assert!(ids("de la").is_empty());
     assert!(ids("the of").is_empty());
+    // Las interrogativas con acento tampoco cuentan ("¿cómo…?" abre casi toda pregunta), aunque la
+    // lista oficial solo trae las formas sin acento.
+    assert!(ids("¿cómo? ¿dónde? ¿cuál? ¿quién? ¿cuándo?").is_empty());
+    assert_eq!(ids("cómo paella"), vec!["a"]);
     // Las palabras con significado siguen funcionando, con o sin acentos.
     assert_eq!(ids("configuración cuenta"), vec!["b"]);
 }

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "johpaz-hive-db"
+description = "HiveDB: base de memoria embebida para agentes de IA (registro de eventos, colecciones, búsqueda híbrida texto + vectores). Motor en Rust."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "John Paez" }]
+requires-python = ">=3.9"
+dynamic = ["version"]
+keywords = ["agents", "memory", "vector-search", "bm25", "embedded-database", "langchain", "langgraph"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/johpaz/hive-db"
+Changelog = "https://github.com/johpaz/hive-db/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.maturin]
+module-name = "hivedb._native"
+python-source = "python"
+manifest-path = "../../crates/hivedb-py/Cargo.toml"
+# Embedder local incluido (el modelo no viaja: se descarga al activarlo).
+features = ["embedder-local"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]

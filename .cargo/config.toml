@@ -3,3 +3,11 @@ rustflags = ["-C", "target-feature=-crt-static"]
 
 [target.aarch64-unknown-linux-musl]
 rustflags = ["-C", "target-feature=-crt-static"]
+
+# Los módulos de extensión de Python se enlazan contra el intérprete que los carga: en macOS los
+# símbolos de Python se resuelven en tiempo de carga (maturin lo añade solo; esto cubre `cargo build`).
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

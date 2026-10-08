@@ -35,7 +35,7 @@ const FTS_MARKER_FILE: &str = "fts.generation";
 /// cómo se tokeniza (filtros, listas de palabras vacías, stemmer): un índice de otra versión
 /// no es válido y se reconstruye al abrir. (El marcador de versiones sin este campo mide 8
 /// bytes y tampoco coincide.)
-const FTS_ANALYSIS_VERSION: u32 = 2;
+const FTS_ANALYSIS_VERSION: u32 = 3;
 const SCHEMA_VERSION: u32 = 2;
 /// Candidatos por fuente en una consulta híbrida: `k × FUSION_DEPTH_FACTOR`, con un mínimo.
 const FUSION_DEPTH_FACTOR: usize = 5;

@@ -98,7 +98,7 @@ if [ "$CHECKS" = 1 ]; then
   say "fmt, clippy y tests (el CI los repite; --no-checks para saltarlos)"
   run cargo fmt --all -- --check
   run cargo clippy --workspace --all-targets --locked -- -D warnings
-  run cargo clippy -p hivedb-napi --all-targets --locked --features embedder-local -- -D warnings
+  run cargo clippy -p hivedb-napi -p hivedb-py --all-targets --locked --features hivedb-napi/embedder-local,hivedb-py/embedder-local -- -D warnings
   run cargo test --workspace --locked
 fi
 
@@ -171,10 +171,11 @@ run git tag -a "$TAG" -m "HiveDB $NEW"
 if [ "$PUSH" = 1 ]; then
   say "Subiendo $BRANCH y $TAG"
   run git push --atomic origin "$BRANCH" "$TAG"
-  say "Hecho. El workflow publicará $NEW al terminar los seis builds y los tests."
+  say "Hecho. El workflow publicará $NEW (npm y PyPI) al terminar los builds y los tests."
   REMOTE=$(git remote get-url origin 2>/dev/null | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')
   echo "   Seguimiento: https://github.com/${REMOTE}/actions"
   echo "   Paquete:     https://www.npmjs.com/package/@johpaz/hive-db"
+  echo "   PyPI:        https://pypi.org/project/johpaz-hive-db/"
 else
   say "Hecho en local (--no-push). Para publicar:  git push --atomic origin $BRANCH $TAG"
 fi

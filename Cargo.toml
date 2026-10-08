@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "crates/hivedb-core",
     "crates/hivedb-index",
+    "crates/hivedb-binding-core",
     "crates/hivedb-napi",
+    "crates/hivedb-py",
     "crates/hivedb-bench",
     "crates/hivedb-embed",
 ]

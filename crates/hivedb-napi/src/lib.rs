@@ -1,14 +1,8 @@
-use hivedb_core::{
-    AgentContextRequest, AgentId, ColOp, Decision, DocEntry, EventInput, EventKind, EventPattern,
-    HarnessInput, HarnessLoop, HiveDB, OpenOptions, PutOptions, ScanOptions, StreamId, ToolStats,
-    VectorOptions,
-};
-use hivedb_index::{FieldBoosts, Fusion, Hit as CoreHit, HybridQuery, IndexDoc, ScalarFilter};
+use hivedb_binding_core as core;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::*;
 use serde_json::Value;
-use std::sync::{Arc, RwLock};
 use tokio::task::JoinHandle;
 
 #[napi(object)]
@@ -185,27 +179,6 @@ pub struct JsPredicate {
     pub value: Option<String>,
 }
 
-/// Obtiene el embedder local compartido fuera del hilo asíncrono: la primera vez del proceso
-/// descarga el modelo (~470 MB, si falta) y lo carga; después devuelve la misma instancia.
-#[cfg(feature = "embedder-local")]
-async fn load_local_embedder() -> Result<Arc<dyn hivedb_core::Embedder>> {
-    // Una sola copia del modelo por proceso: todas las bases comparten la misma instancia en
-    // lugar de cargar ~735 MiB cada una.
-    tokio::task::spawn_blocking(hivedb_embed::LocalEmbedder::shared)
-        .await
-        .map_err(js_err)?
-        .map(|embedder| embedder as Arc<dyn hivedb_core::Embedder>)
-        .map_err(js_err)
-}
-
-#[cfg(not(feature = "embedder-local"))]
-async fn load_local_embedder() -> Result<Arc<dyn hivedb_core::Embedder>> {
-    Err(Error::from_reason(
-        "EMBEDDER_UNAVAILABLE: this build was compiled without the local embedder \
-         (feature `embedder-local`)",
-    ))
-}
-
 /// Avance de la descarga del modelo del embedder local.
 #[napi(object)]
 pub struct JsModelProgress {
@@ -232,47 +205,35 @@ pub struct JsPreparedModel {
 
 /// Descarga (si falta) y verifica el modelo del embedder local, avisando del avance, sin abrir
 /// ninguna base. Permite mostrar una barra de progreso antes de `open({ embedder: "local" })`.
-#[cfg(feature = "embedder-local")]
+/// Sin la feature `embedder-local` falla con `EMBEDDER_UNAVAILABLE`.
 #[napi]
 pub async fn prepare_embedder(
     on_progress: Option<ThreadsafeFunction<JsModelProgress>>,
 ) -> Result<JsPreparedModel> {
     tokio::task::spawn_blocking(move || {
-        let mut report = |progress: &hivedb_embed::Progress| {
+        core::prepare_embedder(|progress| {
             if let Some(callback) = on_progress.as_ref() {
                 callback.call(
                     Ok(JsModelProgress {
-                        file: progress.file.clone(),
-                        file_index: progress.file_index as u32,
-                        file_count: progress.file_count as u32,
+                        file: progress.file,
+                        file_index: progress.file_index,
+                        file_count: progress.file_count,
                         downloaded: progress.downloaded as f64,
                         total: progress.total as f64,
                     }),
                     ThreadsafeFunctionCallMode::NonBlocking,
                 );
             }
-        };
-        hivedb_embed::ensure_multilingual_e5_small_with(&mut report)
+        })
     })
     .await
     .map_err(js_err)?
-    .map(|files| JsPreparedModel {
-        dir: files.dir().display().to_string(),
-        space_id: files.space_id().to_string(),
-        cached: files.was_cached(),
+    .map(|model| JsPreparedModel {
+        dir: model.dir,
+        space_id: model.space_id,
+        cached: model.cached,
     })
     .map_err(js_err)
-}
-
-#[cfg(not(feature = "embedder-local"))]
-#[napi]
-pub async fn prepare_embedder(
-    _on_progress: Option<ThreadsafeFunction<JsModelProgress>>,
-) -> Result<JsPreparedModel> {
-    Err(Error::from_reason(
-        "EMBEDDER_UNAVAILABLE: this build was compiled without the local embedder \
-         (feature `embedder-local`)",
-    ))
 }
 
 fn js_err<E: std::fmt::Display>(e: E) -> Error {
@@ -283,258 +244,108 @@ fn parse_payload(payload: &str) -> Result<Value> {
     serde_json::from_str(payload).map_err(|e| Error::from_reason(format!("invalid payload: {e}")))
 }
 
-fn js_to_event_input(input: JsEventInput) -> Result<EventInput> {
-    let payload = parse_payload(&input.payload)?;
-    let kind = match input.kind.as_str() {
-        "Fact" => EventKind::Fact,
-        "StateTransition" => EventKind::StateTransition,
-        "MemoryInvalidate" => {
-            let target_seq = payload
-                .get("target_seq")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| {
-                    Error::from_reason("MemoryInvalidate requires payload.target_seq")
-                })?;
-            EventKind::MemoryInvalidate { target_seq }
-        }
-        "ToolCall" => {
-            let tool = payload
-                .get("tool")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| Error::from_reason("ToolCall requires payload.tool"))?;
-            EventKind::ToolCall { tool }
-        }
-        "ConsentGranted" => {
-            let from = payload
-                .get("from")
-                .and_then(|v| v.as_str())
-                .map(AgentId::from)
-                .ok_or_else(|| Error::from_reason("ConsentGranted requires payload.from"))?;
-            let to = payload
-                .get("to")
-                .and_then(|v| v.as_str())
-                .map(AgentId::from)
-                .ok_or_else(|| Error::from_reason("ConsentGranted requires payload.to"))?;
-            let action = payload
-                .get("action")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| Error::from_reason("ConsentGranted requires payload.action"))?;
-            let resource = payload
-                .get("resource")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| Error::from_reason("ConsentGranted requires payload.resource"))?;
-            let expires = payload.get("expires").and_then(|v| v.as_u64());
-            EventKind::ConsentGranted {
-                from,
-                to,
-                scope: hivedb_core::Scope::new(action, resource),
-                expires,
-            }
-        }
-        "ConsentRevoked" => {
-            let grant_seq = payload
-                .get("grant_seq")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| Error::from_reason("ConsentRevoked requires payload.grant_seq"))?;
-            EventKind::ConsentRevoked { grant_seq }
-        }
-        "IntentLogged" => {
-            let actor = payload
-                .get("actor")
-                .and_then(|v| v.as_str())
-                .map(AgentId::from)
-                .ok_or_else(|| Error::from_reason("IntentLogged requires payload.actor"))?;
-            let intent = payload
-                .get("intent")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| Error::from_reason("IntentLogged requires payload.intent"))?;
-            let authorized_by = payload.get("authorized_by").and_then(|v| v.as_u64());
-            EventKind::IntentLogged {
-                actor,
-                intent,
-                authorized_by,
-            }
-        }
-        "LearningProposal" => EventKind::LearningProposal,
-        other => return Err(Error::from_reason(format!("unknown event kind: {other}"))),
-    };
-
-    let mut event_input =
-        EventInput::new(input.agent_id, input.stream_id, kind).with_payload(payload);
-    if let Some(seq) = input.causation {
-        event_input = event_input.with_causation(seq as u64);
-    }
-    if let Some(corr) = input.correlation {
-        let parsed = uuid::Uuid::parse_str(&corr)
-            .map_err(|e| Error::from_reason(format!("invalid correlation UUID: {e}")))?;
-        event_input.correlation = Some(parsed);
-    }
-    Ok(event_input)
+fn parse_json_doc(json: &str) -> Result<Value> {
+    serde_json::from_str(json)
+        .map_err(|e| Error::from_reason(format!("invalid document JSON: {e}")))
 }
 
-fn event_to_js(event: &hivedb_core::Event) -> JsEvent {
+fn to_json_string(value: &Value) -> Result<String> {
+    serde_json::to_string(value)
+        .map_err(|e| Error::from_reason(format!("serialization error: {e}")))
+}
+
+fn js_to_event_input(input: JsEventInput) -> Result<core::EventInputDto> {
+    Ok(core::EventInputDto {
+        payload: parse_payload(&input.payload)?,
+        agent_id: input.agent_id,
+        stream_id: input.stream_id,
+        kind: input.kind,
+        causation: input.causation.map(|v| v as u64),
+        correlation: input.correlation,
+    })
+}
+
+fn event_to_js(event: &core::EventDto) -> JsEvent {
     JsEvent {
         seq: event.seq as i64,
-        agent_id: event.agent_id.0.clone(),
-        stream_id: event.stream_id.0.clone(),
-        kind_tag: event.kind_tag().to_string(),
+        agent_id: event.agent_id.clone(),
+        stream_id: event.stream_id.clone(),
+        kind_tag: event.kind_tag.clone(),
         timestamp: event.timestamp as i64,
         causation: event.causation.map(|v| v as i64),
-        correlation: event.correlation.map(|u| u.to_string()),
+        correlation: event.correlation.clone(),
         payload: event.payload.to_string(),
     }
 }
 
-fn js_to_scalar_filter(filter: JsScalarFilter) -> hivedb_index::ScalarFilter {
-    hivedb_index::ScalarFilter::Eq {
+fn js_to_scalar_filter(filter: JsScalarFilter) -> core::ScalarFilterDto {
+    core::ScalarFilterDto {
         field: filter.field,
         value: filter.value,
     }
 }
 
-fn js_to_hybrid_query(query: JsHybridQuery) -> Result<HybridQuery> {
-    let text = query.text;
-    let vector = query.vector.map(|v| v.to_vec());
-    let filters = query
-        .filters
-        .map(|fs| fs.into_iter().map(js_to_scalar_filter).collect())
-        .unwrap_or_default();
-
-    let fusion = match query.fusion {
-        Some(fusion) => match fusion.kind.as_str() {
-            "rrf" => Fusion::Rrf {
-                k: fusion.k.unwrap_or(60) as usize,
-            },
-            other => {
-                return Err(Error::from_reason(format!(
-                    "unknown fusion kind: {other} (only \"rrf\" is supported)"
-                )));
-            }
-        },
-        None => Fusion::default(),
-    };
-
-    let boosts = query.boosts.map(|b| {
-        let defaults = FieldBoosts::default();
-        FieldBoosts {
-            name: b.name.map(|v| v as f32).unwrap_or(defaults.name),
-            body: b.body.map(|v| v as f32).unwrap_or(defaults.body),
-            tags: b.tags.map(|v| v as f32).unwrap_or(defaults.tags),
-        }
-    });
-
-    Ok(HybridQuery {
-        text,
-        vector,
-        k: query.k as usize,
-        filters,
-        fusion,
-        boosts,
-        ef_search: query.ef_search.map(|v| v as usize),
-    })
+fn js_to_filters(filters: Option<Vec<JsScalarFilter>>) -> Option<Vec<core::ScalarFilterDto>> {
+    filters.map(|fs| fs.into_iter().map(js_to_scalar_filter).collect())
 }
 
-fn js_to_index_doc(doc: JsIndexDoc) -> IndexDoc {
-    IndexDoc {
+fn js_to_hybrid_query(query: JsHybridQuery) -> core::HybridQueryDto {
+    core::HybridQueryDto {
+        text: query.text,
+        vector: query.vector.map(|v| v.to_vec()),
+        k: query.k,
+        filters: js_to_filters(query.filters),
+        fusion: query.fusion.map(|f| core::FusionDto {
+            kind: f.kind,
+            k: f.k,
+        }),
+        boosts: query.boosts.map(|b| core::FieldBoostsDto {
+            name: b.name,
+            body: b.body,
+            tags: b.tags,
+        }),
+        ef_search: query.ef_search,
+    }
+}
+
+fn js_to_index_doc(doc: JsIndexDoc) -> core::IndexDocDto {
+    core::IndexDocDto {
         id: doc.id,
         name: doc.name,
         body: doc.body,
         tags: doc.tags,
         vector: doc.vector.map(|v| v.to_vec()),
-        filters: doc
-            .filters
-            .map(|fs| fs.into_iter().map(js_to_scalar_filter).collect())
-            .unwrap_or_default(),
+        filters: js_to_filters(doc.filters),
     }
 }
 
-fn hit_to_js(hit: CoreHit) -> JsHit {
+fn hit_to_js(hit: core::HitDto) -> JsHit {
     JsHit {
         id: hit.id,
-        score: hit.score as f64,
-        text_score: hit.text_score.map(|s| s as f64),
-        vector_score: hit.vector_score.map(|s| s as f64),
+        score: hit.score,
+        text_score: hit.text_score,
+        vector_score: hit.vector_score,
     }
 }
 
-fn decision_to_js(decision: Decision) -> JsDecision {
-    JsDecision {
-        allowed: decision.allowed(),
-        intent_log_seq: decision.intent_log_seq().map(|v| v as i64),
-    }
-}
-
-fn tool_stats_to_js(stats: ToolStats) -> JsToolStats {
-    JsToolStats {
-        invocations: stats.invocations as i64,
-        errors: stats.errors as i64,
-        total_latency_ms: stats.total_latency_ms as i64,
-        total_cost: stats.total_cost,
-        last_outcome: stats.last_outcome,
-        last_seq: stats.last_seq as i64,
-    }
-}
-
-fn js_to_event_pattern(pattern: JsEventPattern) -> Result<EventPattern> {
-    use hivedb_core::{EventKindTag, Predicate};
-
-    let kind = match pattern.kind.as_deref() {
-        Some("Fact") => Some(EventKindTag::Fact),
-        Some("StateTransition") => Some(EventKindTag::StateTransition),
-        Some("MemoryInvalidate") => Some(EventKindTag::MemoryInvalidate),
-        Some("ToolCall") => Some(EventKindTag::ToolCall),
-        Some("ConsentGranted") => Some(EventKindTag::ConsentGranted),
-        Some("ConsentRevoked") => Some(EventKindTag::ConsentRevoked),
-        Some("IntentLogged") => Some(EventKindTag::IntentLogged),
-        Some(other) => return Err(Error::from_reason(format!("unknown kind: {other}"))),
-        None => None,
-    };
-
+fn js_to_event_pattern(pattern: JsEventPattern) -> Result<core::EventPatternDto> {
     let predicate = match pattern.predicate {
-        Some(p) => match p.kind.as_str() {
-            "Eq" => {
-                let path = p
-                    .path
-                    .ok_or_else(|| Error::from_reason("Eq predicate requires path"))?;
-                let value_json = p
-                    .value
-                    .ok_or_else(|| Error::from_reason("Eq predicate requires value"))?;
-                let value = parse_payload(&value_json)?;
-                Some(Predicate::Eq { path, value })
-            }
-            "Contains" => {
-                let path = p
-                    .path
-                    .ok_or_else(|| Error::from_reason("Contains predicate requires path"))?;
-                let value_json = p
-                    .value
-                    .ok_or_else(|| Error::from_reason("Contains predicate requires value"))?;
-                let value = parse_payload(&value_json)?;
-                Some(Predicate::Contains { path, value })
-            }
-            "Always" => Some(Predicate::Always),
-            other => {
-                return Err(Error::from_reason(format!(
-                    "unknown predicate kind: {other} (expected Eq, Contains or Always)"
-                )));
-            }
-        },
+        Some(p) => Some(core::PredicateDto {
+            kind: p.kind,
+            path: p.path,
+            value: p.value.as_deref().map(parse_payload).transpose()?,
+        }),
         None => None,
     };
-
-    Ok(EventPattern {
-        agent_id: pattern.agent_id.map(AgentId::from),
-        kind,
-        stream_id: pattern.stream_id.map(StreamId::from),
+    Ok(core::EventPatternDto {
+        agent_id: pattern.agent_id,
+        kind: pattern.kind,
+        stream_id: pattern.stream_id,
         predicate,
     })
 }
 
-fn doc_entry_to_js(entry: DocEntry) -> JsDocEntry {
+fn doc_entry_to_js(entry: core::DocEntryDto) -> JsDocEntry {
     JsDocEntry {
         id: entry.id,
         version: entry.version as i64,
@@ -542,61 +353,22 @@ fn doc_entry_to_js(entry: DocEntry) -> JsDocEntry {
     }
 }
 
-fn js_to_scan_options(options: Option<JsScanOptions>) -> ScanOptions {
-    let options = options.unwrap_or(JsScanOptions {
-        prefix: None,
-        start: None,
-        limit: None,
-        offset: None,
-        reverse: None,
-    });
-    ScanOptions {
-        prefix: options.prefix,
-        start: options.start,
-        limit: options.limit.unwrap_or(0) as usize,
-        offset: options.offset.unwrap_or(0) as usize,
-        reverse: options.reverse.unwrap_or(false),
-    }
-}
-
-fn parse_json_doc(json: &str) -> Result<serde_json::Value> {
-    serde_json::from_str(json)
-        .map_err(|e| Error::from_reason(format!("invalid document JSON: {e}")))
+fn js_to_scan_options(options: Option<JsScanOptions>) -> Option<core::ScanOptionsDto> {
+    options.map(|o| core::ScanOptionsDto {
+        prefix: o.prefix,
+        start: o.start,
+        limit: o.limit,
+        offset: o.offset,
+        reverse: o.reverse,
+    })
 }
 
 #[napi]
 pub struct JsHiveDB {
-    /// `RwLock` y no `Mutex`: las operaciones comparten el candado de lectura, así que varias
-    /// consultas pueden ejecutarse a la vez sobre la misma base (con un `Mutex`, `with_db` lo
-    /// mantenía durante toda la operación y serializaba incluso las lecturas, embedding incluido).
-    /// `close()` toma el de escritura: espera a que terminen las operaciones en curso.
-    inner: RwLock<Option<Arc<HiveDB>>>,
+    /// El candado de lectura/escritura vive en el crate común: las consultas comparten la base y
+    /// `close()` espera a las operaciones en curso.
+    inner: core::Handle,
     runtime: tokio::runtime::Handle,
-}
-
-impl JsHiveDB {
-    fn with_db<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&HiveDB) -> Result<T>,
-    {
-        let lock = self
-            .inner
-            .read()
-            .map_err(|_| Error::from_reason("database lock poisoned"))?;
-        match lock.as_ref() {
-            Some(db) => f(db),
-            None => Err(Error::from_reason("database is closed")),
-        }
-    }
-
-    fn db_arc(&self) -> Result<Arc<HiveDB>> {
-        let lock = self
-            .inner
-            .read()
-            .map_err(|_| Error::from_reason("database lock poisoned"))?;
-        lock.clone()
-            .ok_or_else(|| Error::from_reason("database is closed"))
-    }
 }
 
 #[napi]
@@ -607,36 +379,33 @@ impl JsHiveDB {
             Some(o) => (o.vector, o.embedder),
             None => (None, None),
         };
-        let open_options = OpenOptions {
-            vector: vector
-                .map(|vector| VectorOptions::new(vector.dimension as usize, vector.space_id)),
-            embedder: match embedder.as_deref() {
-                None => None,
-                Some("local") => Some(load_local_embedder().await?),
-                Some(other) => {
-                    return Err(Error::from_reason(format!(
-                        "unknown embedder: {other} (only \"local\" is supported)"
-                    )));
-                }
-            },
+        // El modelo se descarga/carga fuera del hilo asíncrono (la primera vez son ~470 MB).
+        let embedder = match embedder {
+            None => None,
+            Some(name) => tokio::task::spawn_blocking(move || core::resolve_embedder(Some(&name)))
+                .await
+                .map_err(js_err)?
+                .map_err(js_err)?,
         };
-        // ":memory:" opens an ephemeral database backed by a process-lifetime
-        // temporary directory, so tests never touch persistent storage.
-        let db = if path == ":memory:" {
-            HiveDB::open_temp_with_options(open_options).map_err(js_err)?
-        } else {
-            HiveDB::open_with_options(path, open_options).map_err(js_err)?
-        };
+        let vector = vector.map(|v| core::VectorOptionsDto {
+            dimension: v.dimension,
+            space_id: v.space_id,
+        });
+        // ":memory:" abre una base efímera en un directorio temporal del proceso.
+        let inner = core::Handle::open(&path, vector, embedder).map_err(js_err)?;
         Ok(Self {
-            inner: RwLock::new(Some(Arc::new(db))),
+            inner,
             runtime: tokio::runtime::Handle::current(),
         })
     }
 
     #[napi]
     pub async fn append(&self, input: JsEventInput) -> Result<i64> {
-        let event_input = js_to_event_input(input)?;
-        self.with_db(|db| db.append(event_input).map_err(js_err).map(|seq| seq as i64))
+        let input = js_to_event_input(input)?;
+        self.inner
+            .append(input)
+            .map(|seq| seq as i64)
+            .map_err(js_err)
     }
 
     #[napi]
@@ -644,20 +413,18 @@ impl JsHiveDB {
         if seq < 0 {
             return Err(Error::from_reason("seq must be non-negative"));
         }
-        self.with_db(|db| {
-            let event = db.read(seq as u64).map_err(js_err)?;
-            Ok(event_to_js(&event))
-        })
+        let event = self.inner.read(seq as u64).map_err(js_err)?;
+        Ok(event_to_js(&event))
     }
 
     #[napi]
     pub async fn log_len(&self) -> Result<i64> {
-        self.with_db(|db| db.log_len().map_err(js_err).map(|len| len as i64))
+        self.inner.log_len().map(|len| len as i64).map_err(js_err)
     }
 
     #[napi(js_name = "lastSeq")]
     pub async fn last_seq(&self) -> Result<i64> {
-        self.with_db(|db| db.last_seq().map_err(js_err).map(|seq| seq as i64))
+        self.inner.last_seq().map(|seq| seq as i64).map_err(js_err)
     }
 
     /// Estadísticas agregadas de una herramienta.
@@ -671,16 +438,18 @@ impl JsHiveDB {
         tool: String,
         agents: Option<Vec<String>>,
     ) -> Result<Option<JsToolStats>> {
-        self.with_db(|db| {
-            let stats = match agents {
-                Some(ref ids) => {
-                    let ids: Vec<AgentId> = ids.iter().cloned().map(AgentId::from).collect();
-                    db.tool_stats_for_agents(&tool, &ids).map_err(js_err)?
-                }
-                None => db.tool_stats(&tool).map_err(js_err)?,
-            };
-            Ok(stats.map(tool_stats_to_js))
-        })
+        let stats = self
+            .inner
+            .tool_stats(&tool, agents.as_deref())
+            .map_err(js_err)?;
+        Ok(stats.map(|s| JsToolStats {
+            invocations: s.invocations as i64,
+            errors: s.errors as i64,
+            total_latency_ms: s.total_latency_ms as i64,
+            total_cost: s.total_cost,
+            last_outcome: s.last_outcome,
+            last_seq: s.last_seq as i64,
+        }))
     }
 
     #[napi]
@@ -689,20 +458,17 @@ impl JsHiveDB {
         agent_id: String,
         stream_id: String,
     ) -> Result<Option<String>> {
-        use hivedb_core::{TaskState, TaskStateState};
-        self.with_db(|db| {
-            let state: TaskStateState = db.project::<TaskState>().map_err(js_err)?;
-            Ok(state
-                .get(&AgentId::from(agent_id), &StreamId::from(stream_id))
-                .map(|v| v.to_string()))
-        })
+        self.inner
+            .project_task_state(&agent_id, &stream_id)
+            .map_err(js_err)
     }
 
     #[napi]
     pub async fn can(&self, agent: String, action: String, resource: String) -> Result<JsDecision> {
-        self.with_db(|db| {
-            let decision = db.can(agent, action, resource).map_err(js_err)?;
-            Ok(decision_to_js(decision))
+        let decision = self.inner.can(&agent, &action, &resource).map_err(js_err)?;
+        Ok(JsDecision {
+            allowed: decision.allowed,
+            intent_log_seq: decision.intent_log_seq.map(|v| v as i64),
         })
     }
 
@@ -716,31 +482,25 @@ impl JsHiveDB {
         ttl_ms: Option<i64>,
     ) -> Result<()> {
         let value = parse_payload(&json)?;
-        let ttl = ttl_ms.map(|ms| std::time::Duration::from_millis(ms.max(0) as u64));
-        self.with_db(|db| {
-            db.working_set(agent_id, key, value, ttl);
-            Ok(())
-        })
+        self.inner
+            .working_set(&agent_id, &key, value, ttl_ms)
+            .map_err(js_err)
     }
 
     /// Retrieve a value from working memory, returning `None` if expired or missing.
     #[napi(js_name = "workingGet")]
     pub async fn working_get(&self, agent_id: String, key: String) -> Result<Option<String>> {
-        self.with_db(|db| {
-            Ok(db
-                .working_get(agent_id.clone(), &key)
-                .map(|value| value.to_string()))
-        })
+        let value = self.inner.working_get(&agent_id, &key).map_err(js_err)?;
+        Ok(value.map(|v| v.to_string()))
     }
 
     /// Return all non-expired keys for an agent.
     #[napi(js_name = "workingKeys")]
     pub async fn working_keys(&self, agent_id: String) -> Result<Vec<String>> {
-        self.with_db(|db| Ok(db.working_keys(agent_id.clone())))
+        self.inner.working_keys(&agent_id).map_err(js_err)
     }
 
-    /// Build the causal thread for a task as a JSON string.
-    /// Hilo causal de un stream.
+    /// Hilo causal de un stream, como JSON.
     ///
     /// `agents` acota la búsqueda a esos agentes. Omitirlo recorre el log de
     /// toda la base, que es lo correcto cuando la base tiene un solo dueño y
@@ -751,40 +511,29 @@ impl JsHiveDB {
         stream_id: String,
         agents: Option<Vec<String>>,
     ) -> Result<String> {
-        self.with_db(|db| {
-            let thread = match agents {
-                Some(ref ids) => {
-                    let ids: Vec<AgentId> = ids.iter().cloned().map(AgentId::from).collect();
-                    db.causal_thread_for_agents(stream_id, &ids)
-                        .map_err(js_err)?
-                }
-                None => db.causal_thread(stream_id).map_err(js_err)?,
-            };
-            serde_json::to_string(&thread)
-                .map_err(|e| Error::from_reason(format!("serialization error: {e}")))
-        })
+        let thread = self
+            .inner
+            .causal_thread(&stream_id, agents.as_deref())
+            .map_err(js_err)?;
+        to_json_string(&thread)
     }
 
     /// Build an agent context window for a task as a JSON string.
     #[napi(js_name = "buildAgentContext")]
     pub async fn build_agent_context(&self, req_json: String) -> Result<String> {
-        self.with_db(|db| {
-            let req: AgentContextRequest = serde_json::from_str(&req_json)
-                .map_err(|e| Error::from_reason(format!("invalid request: {e}")))?;
-            let ctx = db.build_agent_context(req).map_err(js_err)?;
-            serde_json::to_string(&ctx)
-                .map_err(|e| Error::from_reason(format!("serialization error: {e}")))
-        })
+        let request: Value = serde_json::from_str(&req_json)
+            .map_err(|e| Error::from_reason(format!("invalid request: {e}")))?;
+        let context = self.inner.build_agent_context(request).map_err(js_err)?;
+        to_json_string(&context)
     }
 
     /// Evaluate a task with the harness loop. Input and output are JSON strings.
     #[napi(js_name = "evaluateHarness")]
     pub async fn evaluate_harness(&self, input_json: String) -> Result<String> {
-        let input: HarnessInput = serde_json::from_str(&input_json)
+        let input: Value = serde_json::from_str(&input_json)
             .map_err(|e| Error::from_reason(format!("invalid input: {e}")))?;
-        let eval = HarnessLoop::evaluate(input);
-        serde_json::to_string(&eval)
-            .map_err(|e| Error::from_reason(format!("serialization error: {e}")))
+        let evaluation = core::evaluate_harness(input).map_err(js_err)?;
+        to_json_string(&evaluation)
     }
 
     /// Deprecated: use `upsertDoc`. Kept for one version; `text` maps to the
@@ -797,54 +546,49 @@ impl JsHiveDB {
         vector: Float32Array,
         filters: Option<Vec<JsScalarFilter>>,
     ) -> Result<()> {
-        let vector = vector.to_vec();
-        let filters: Vec<ScalarFilter> = filters
-            .map(|fs| fs.into_iter().map(js_to_scalar_filter).collect::<Vec<_>>())
-            .unwrap_or_default();
-        self.with_db(|db| {
-            db.index_doc_with(id, text, vector, &filters)
-                .map_err(js_err)
-        })
+        self.inner
+            .index_doc(id, text, vector.to_vec(), js_to_filters(filters))
+            .map_err(js_err)
     }
 
     /// Insert or replace a document in the semantic index.
     #[napi]
     pub async fn upsert_doc(&self, doc: JsIndexDoc) -> Result<()> {
-        let doc = js_to_index_doc(doc);
-        self.with_db(|db| db.upsert_doc(&doc).map_err(js_err))
+        self.inner.upsert_doc(js_to_index_doc(doc)).map_err(js_err)
     }
 
     /// Insert or replace a batch of documents under a single text-index
     /// commit. Much faster than repeated `upsertDoc` calls.
     #[napi]
     pub async fn upsert_batch(&self, docs: Vec<JsIndexDoc>) -> Result<()> {
-        let docs: Vec<IndexDoc> = docs.into_iter().map(js_to_index_doc).collect();
-        self.with_db(|db| db.upsert_batch(&docs).map_err(js_err))
+        let docs = docs.into_iter().map(js_to_index_doc).collect();
+        self.inner.upsert_batch(docs).map_err(js_err)
     }
 
     /// Delete a document from the semantic index. Missing ids are a no-op.
     #[napi]
     pub async fn delete_doc(&self, id: String) -> Result<()> {
-        self.with_db(|db| db.delete_doc(&id).map_err(js_err))
+        self.inner.delete_doc(&id).map_err(js_err)
     }
 
     /// Delete every indexed document carrying the given scalar filter.
     #[napi]
     pub async fn delete_by_filter(&self, filter: JsScalarFilter) -> Result<()> {
-        let filter = js_to_scalar_filter(filter);
-        self.with_db(|db| db.delete_by_filter(&filter).map_err(js_err))
+        self.inner
+            .delete_by_filter(js_to_scalar_filter(filter))
+            .map_err(js_err)
     }
 
     /// Remove every document from the semantic index.
     #[napi]
     pub async fn clear_index(&self) -> Result<()> {
-        self.with_db(|db| db.clear_index().map_err(js_err))
+        self.inner.clear_index().map_err(js_err)
     }
 
     /// Reconstruye los índices semánticos desde sus documentos autoritativos.
     #[napi]
     pub async fn compact_index(&self) -> Result<()> {
-        self.with_db(|db| db.compact_index().map_err(js_err))
+        self.inner.compact_index().map_err(js_err)
     }
 
     /// Insert or replace a JSON document in a collection. Returns the new
@@ -858,31 +602,24 @@ impl JsHiveDB {
         options: Option<JsPutOptions>,
     ) -> Result<i64> {
         let doc = parse_json_doc(&json)?;
-        let put_options = PutOptions {
-            expected_version: options.and_then(|o| o.expected_version).map(|v| v as u64),
-        };
-        self.with_db(|db| {
-            db.col_put(&collection, &id, &doc, put_options)
-                .map_err(js_err)
-                .map(|v| v as i64)
-        })
+        let expected = options.and_then(|o| o.expected_version).map(|v| v as u64);
+        self.inner
+            .col_put(&collection, &id, &doc, expected)
+            .map(|v| v as i64)
+            .map_err(js_err)
     }
 
     /// Read a document by id.
     #[napi]
     pub async fn col_get(&self, collection: String, id: String) -> Result<Option<JsDocEntry>> {
-        self.with_db(|db| {
-            Ok(db
-                .col_get(&collection, &id)
-                .map_err(js_err)?
-                .map(doc_entry_to_js))
-        })
+        let entry = self.inner.col_get(&collection, &id).map_err(js_err)?;
+        Ok(entry.map(doc_entry_to_js))
     }
 
     /// Delete a document. Returns true if it existed.
     #[napi]
     pub async fn col_delete(&self, collection: String, id: String) -> Result<bool> {
-        self.with_db(|db| db.col_delete(&collection, &id).map_err(js_err))
+        self.inner.col_delete(&collection, &id).map_err(js_err)
     }
 
     /// Scan a collection in id order.
@@ -892,21 +629,20 @@ impl JsHiveDB {
         collection: String,
         options: Option<JsScanOptions>,
     ) -> Result<Vec<JsDocEntry>> {
-        let scan = js_to_scan_options(options);
-        self.with_db(|db| {
-            Ok(db
-                .col_scan(&collection, &scan)
-                .map_err(js_err)?
-                .into_iter()
-                .map(doc_entry_to_js)
-                .collect())
-        })
+        let entries = self
+            .inner
+            .col_scan(&collection, js_to_scan_options(options))
+            .map_err(js_err)?;
+        Ok(entries.into_iter().map(doc_entry_to_js).collect())
     }
 
     /// Number of documents in a collection.
     #[napi]
     pub async fn col_count(&self, collection: String) -> Result<i64> {
-        self.with_db(|db| db.col_count(&collection).map_err(js_err).map(|c| c as i64))
+        self.inner
+            .col_count(&collection)
+            .map(|c| c as i64)
+            .map_err(js_err)
     }
 
     /// Create an equality index on a top-level field (optionally unique).
@@ -918,10 +654,9 @@ impl JsHiveDB {
         field: String,
         unique: bool,
     ) -> Result<()> {
-        self.with_db(|db| {
-            db.col_create_index(&collection, &field, unique)
-                .map_err(js_err)
-        })
+        self.inner
+            .col_create_index(&collection, &field, unique)
+            .map_err(js_err)
     }
 
     /// Look up documents whose indexed field equals the given JSON scalar
@@ -935,56 +670,37 @@ impl JsHiveDB {
         options: Option<JsScanOptions>,
     ) -> Result<Vec<JsDocEntry>> {
         let value = parse_json_doc(&value_json)?;
-        let scan = js_to_scan_options(options);
-        self.with_db(|db| {
-            Ok(db
-                .col_find_by(&collection, &field, &value, &scan)
-                .map_err(js_err)?
-                .into_iter()
-                .map(doc_entry_to_js)
-                .collect())
-        })
+        let entries = self
+            .inner
+            .col_find_by(&collection, &field, &value, js_to_scan_options(options))
+            .map_err(js_err)?;
+        Ok(entries.into_iter().map(doc_entry_to_js).collect())
     }
 
     /// Apply several puts/deletes atomically: either every operation commits
     /// or none does.
     #[napi]
     pub async fn col_batch(&self, ops: Vec<JsColOp>) -> Result<()> {
-        let mut parsed: Vec<ColOp> = Vec::with_capacity(ops.len());
+        let mut parsed = Vec::with_capacity(ops.len());
         for op in ops {
-            match op.op.as_str() {
-                "put" => {
-                    let json = op
-                        .json
-                        .ok_or_else(|| Error::from_reason("batch put requires the json field"))?;
-                    parsed.push(ColOp::Put {
-                        collection: op.collection,
-                        id: op.id,
-                        doc: parse_json_doc(&json)?,
-                        expected_version: op.expected_version.map(|v| v as u64),
-                    });
-                }
-                "delete" => parsed.push(ColOp::Delete {
-                    collection: op.collection,
-                    id: op.id,
-                }),
-                other => {
-                    return Err(Error::from_reason(format!(
-                        "unknown batch op: {other} (expected \"put\" or \"delete\")"
-                    )));
-                }
-            }
+            parsed.push(core::ColOpDto {
+                doc: op.json.as_deref().map(parse_json_doc).transpose()?,
+                op: op.op,
+                collection: op.collection,
+                id: op.id,
+                expected_version: op.expected_version.map(|v| v as u64),
+            });
         }
-        self.with_db(|db| db.col_batch(&parsed).map_err(js_err))
+        self.inner.col_batch(parsed).map_err(js_err)
     }
 
     #[napi]
     pub async fn query_hybrid(&self, query: JsHybridQuery) -> Result<Vec<JsHit>> {
-        let query = js_to_hybrid_query(query)?;
-        self.with_db(|db| {
-            let hits = db.query_hybrid(query).map_err(js_err)?;
-            Ok(hits.into_iter().map(hit_to_js).collect())
-        })
+        let hits = self
+            .inner
+            .query_hybrid(js_to_hybrid_query(query))
+            .map_err(js_err)?;
+        Ok(hits.into_iter().map(hit_to_js).collect())
     }
 
     /// Búsqueda vectorial sin filtros con la ruta del HNSW (capas y nodos visitados).
@@ -995,33 +711,22 @@ impl JsHiveDB {
         k: u32,
         ef_search: Option<u32>,
     ) -> Result<JsVectorTrace> {
-        let vector = vector.to_vec();
-        self.with_db(|db| {
-            let trace = db
-                .trace_vector_search(&vector, k as usize, ef_search.map(|e| e as usize))
-                .map_err(js_err)?;
-            Ok(JsVectorTrace {
-                hits: trace
-                    .hits
-                    .into_iter()
-                    .map(|(id, _, score)| JsHit {
-                        id,
-                        score: score as f64,
-                        text_score: None,
-                        vector_score: Some(score as f64),
-                    })
-                    .collect(),
-                steps: trace
-                    .steps
-                    .into_iter()
-                    .map(|s| JsTraceStep {
-                        layer: s.layer as u32,
-                        from: s.from,
-                        node: s.node,
-                        distance: s.distance as f64,
-                    })
-                    .collect(),
-            })
+        let trace = self
+            .inner
+            .trace_vector(&vector, k, ef_search)
+            .map_err(js_err)?;
+        Ok(JsVectorTrace {
+            hits: trace.hits.into_iter().map(hit_to_js).collect(),
+            steps: trace
+                .steps
+                .into_iter()
+                .map(|s| JsTraceStep {
+                    layer: s.layer,
+                    from: s.from,
+                    node: s.node,
+                    distance: s.distance,
+                })
+                .collect(),
         })
     }
 
@@ -1031,14 +736,15 @@ impl JsHiveDB {
         pattern: JsEventPattern,
         callback: ThreadsafeFunction<JsEvent>,
     ) -> Result<JsSubscription> {
-        let pattern = js_to_event_pattern(pattern)?;
-        let db = self.db_arc()?;
-        let subscription = db.subscribe(pattern);
+        let subscription = self
+            .inner
+            .subscribe(js_to_event_pattern(pattern)?)
+            .map_err(js_err)?;
 
         let handle = self.runtime.spawn(async move {
             let mut subscription = subscription;
             while let Some(event) = subscription.next().await {
-                let js_event = event_to_js(&event);
+                let js_event = event_to_js(&core::EventDto::from(&event));
                 if callback.call(Ok(js_event), ThreadsafeFunctionCallMode::NonBlocking)
                     != napi::Status::Ok
                 {
@@ -1052,8 +758,7 @@ impl JsHiveDB {
 
     #[napi]
     pub fn close(&mut self) {
-        let mut lock = self.inner.write().unwrap();
-        *lock = None;
+        self.inner.close();
     }
 }
 

@@ -1,6 +1,6 @@
 # HiveDB — Guía de uso para agentes
 
-> Cómo usar HiveDB desde **Bun** a través del paquete TypeScript `@johpaz/hive-db`.
+> Cómo usar HiveDB desde **Bun** a través del paquete TypeScript `@johpaz/hive-db` (y desde Python con `hive-db`, ver §13).
 
 ---
 
@@ -370,11 +370,11 @@ Puedes consultar solo por texto, solo por vector, o ambos. La semántica del `sc
 
 El parsing del texto es tolerante: comillas sin cerrar, operadores y signos de puntuación degradan a una búsqueda bolsa-de-palabras en lugar de fallar.
 
-**Palabras vacías.** Al indexar y al consultar se ignoran las palabras vacías del español y del inglés («de», «la», «que», «the», «of»…): no cuentan como coincidencia. Una consulta hecha solo de palabras vacías no encuentra nada. Se aplican antes de quitar acentos y de aplicar el stemmer (que conserva «transacción» ≈ «transaccion», «pagos» ≈ «pago»).
+**Palabras vacías.** Al indexar y al consultar se ignoran las palabras vacías del español y del inglés («de», «la», «que», «the», «of», y las interrogativas «cómo», «cuál», «dónde»…): no cuentan como coincidencia. Una consulta hecha solo de palabras vacías no encuentra nada. Se aplican antes de quitar acentos y de aplicar el stemmer (que conserva «transacción» ≈ «transaccion», «pagos» ≈ «pago»).
 
 **Fusión híbrida.** En una consulta con texto y vector, cada fuente aporta más candidatos que `k` (`max(5·k, 50)`) antes de fusionar, de modo que un documento bien situado en las dos listas gana a uno que solo es primero en una. La fusión es **determinista**: ante una misma puntuación gana el documento con mejor puesto en alguna lista y, al final, el id; la misma consulta siempre devuelve el mismo orden.
 
-**Actualizar desde 0.6.0.** El análisis de texto cambió (palabras vacías), así que el índice de texto de una base existente se reconstruye una vez al abrirla con la 0.6.1; los datos no se tocan.
+**Actualizar desde 0.6.0.** El análisis de texto cambió (palabras vacías en 0.6.1; interrogativas con acento como «cómo» o «cuál» en la versión siguiente), así que el índice de texto de una base existente se reconstruye una vez al abrirla con cada una de esas versiones; los datos no se tocan.
 
 ### Borrar y mantener
 
@@ -735,3 +735,47 @@ interface HarnessInput {
   min_confidence?: number;
 }
 ```
+
+---
+
+## 13. Python
+
+El mismo motor está disponible para Python como el paquete `johpaz-hive-db` (import `hivedb`), con wheels para
+Linux (glibc y musl, x64 y arm64), macOS (x64 y arm64) y Windows (x64); una sola wheel por plataforma sirve
+a Python 3.9 en adelante.
+
+```bash
+pip install johpaz-hive-db
+pip install johpaz-langchain-hivedb            # adaptadores de LangChain (VectorStore, historial de chat)
+pip install "johpaz-langchain-hivedb[langgraph]" # + HiveDBStore, la memoria a largo plazo de LangGraph
+```
+
+La API es la de TypeScript en `snake_case` y síncrona (cada llamada suelta el GIL, así que varios hilos
+consultan la misma base a la vez); `AsyncHiveDB` ofrece la misma API con `await`:
+
+```python
+from hivedb import HiveDB, HiveDBError
+
+HiveDB.prepare_embedder(lambda p: print(p.file, p.downloaded, "/", p.total))   # una vez por aplicación
+with HiveDB.open("./memoria", embedder="local") as db:
+    db.append("agente-1", "tarea-7", "Fact", {"temperatura": 21.5})     # payload: cualquier JSON
+    db.upsert_doc("d1", body="Receta de paella valenciana", filters={"tenant": "acme"})
+    hits = db.query_hybrid(text="cómo cocinar arroz", k=5, filters={"tenant": "acme"})
+    notas = db.collection("notas")
+    notas.put("n1", {"cliente": "acme"}, expected_version=0)
+    notas.create_index("cliente")
+    with db.events({"kind": "ToolCall"}) as eventos:                     # suscripción: iterable
+        for evento in eventos: ...
+```
+
+Diferencias respecto a TypeScript: los `payload` y los documentos son objetos Python (no cadenas JSON),
+los resultados son `dataclasses` (`Event`, `Hit`, `DocEntry`…), los vectores pueden ser listas, tuplas,
+`array.array` o arrays de numpy, y los filtros pueden escribirse como `{"tenant": "acme"}`. Los errores son
+`HiveDBError` con el atributo `code` (`INVALID_VECTOR`, `VECTOR_SPACE_MISMATCH`, `INDEX_DEGRADED`,
+`EMBEDDER_UNAVAILABLE`). El modelo del embedder local, las variables `HIVEDB_MODEL_DIR` /
+`HIVEDB_MODEL_BASE_URL` / `HIVEDB_OFFLINE` y el comportamiento multiusuario son exactamente los de §5 y
+[`AGENT_GUIDE`](AGENT_GUIDE.md) §5.7: un modelo por proceso, compartido por todas las bases. Referencia
+completa en [`packages/hive-db-py/README.md`](../packages/hive-db-py/README.md) y adaptadores en
+[`packages/langchain-hivedb/README.md`](../packages/langchain-hivedb/README.md).
+
+---

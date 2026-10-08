@@ -92,6 +92,39 @@ y recibe el binario correcto para su SO sin necesitar Rust.
 
 ---
 
+## 2b. Distribución en PyPI (`johpaz-hive-db`)
+
+El binding Python se publica como **`johpaz-hive-db`** (import `hivedb`) con `maturin`: una wheel `abi3` por
+plataforma, compilada con el embedder local (el modelo no viaja; se descarga al activarlo). Sirve a
+Python 3.9 en adelante.
+
+| Wheel | Plataforma |
+|---|---|
+| `manylinux_2_28_x86_64` / `aarch64` | Linux glibc, x64 y arm64 |
+| `musllinux_1_2_x86_64` | Linux musl (Alpine) |
+| `macosx_x86_64` / `macosx_arm64` | macOS Intel y Apple Silicon |
+| `win_amd64` | Windows x64 |
+| sdist | compila desde el código fuente (necesita Rust) |
+
+La **versión** es la de `[workspace.package]` en `Cargo.toml` (`pyproject.toml` declara `dynamic = ["version"]`),
+así que `scripts/release.sh` publica npm y PyPI con el mismo número. `johpaz-langchain-hivedb` (Python puro) lleva su
+propia versión en `packages/langchain-hivedb/pyproject.toml` y se publica con el mismo workflow; si esa versión
+ya está en PyPI se omite.
+
+Requisitos (una sola vez): crear el proyecto `johpaz-hive-db` (y `johpaz-langchain-hivedb`) en PyPI y configurar
+**Trusted Publishing** para el repositorio, workflow `ci.yml` y entorno `pypi`; o bien definir el secreto
+`PYPI_API_TOKEN` (un token de la cuenta). Antes del primer release, comprueba que el nombre `johpaz-hive-db` esté libre. PyPI no tiene scopes como npm (`@johpaz/`): el prefijo `johpaz-` es su equivalente.
+
+El workflow ejecuta, además de lo de npm: `wheels` (6 plataformas), `sdist`, `test-python` (pytest en Python
+3.9 y 3.13 con la wheel recién construida), `python-e2e` (modelo real en 5 plataformas, musl en Alpine),
+`test-langchain` (adaptadores, incluida la suite de contrato de `langchain-tests`) y, solo en tags `v*`,
+`publish-pypi` (idempotente con `skip-existing`). `publish` (npm) también espera a todos ellos: si falla
+Python, no se publica nada.
+
+Manual (sin CI): `cd packages/hive-db-py && maturin build --release --out dist` (la wheel del SO actual) y
+`maturin upload dist/*` / `twine upload dist/*`.
+
+
 ## 3. Cómo publicar una versión
 
 ### Requisitos (una sola vez)
@@ -130,6 +163,8 @@ tests de Bun, tests del embedder con el modelo real y, solo si todo pasó, el jo
 5. Compila el TypeScript (`tsc`).
 6. Publica el paquete principal: `npm publish --access public`.
 7. Crea la GitHub Release con los binarios.
+
+En paralelo, `publish-pypi` sube las wheels y el sdist de `johpaz-hive-db` y los artefactos de `johpaz-langchain-hivedb` (ver §2b).
 
 Si algo falla a medias, corrige y vuelve a lanzar el job desde la pestaña Actions: la publicación es
 idempotente. Para repetir una versión que no llegó a publicarse hay que borrar el tag

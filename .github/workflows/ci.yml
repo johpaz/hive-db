@@ -44,7 +44,7 @@ jobs:
 
       # El binding publicado se compila con el embedder local: se lintea también así.
       - name: Run clippy (embedder local)
-        run: cargo clippy -p hivedb-napi --all-targets --locked --features embedder-local -- -D warnings
+        run: cargo clippy -p hivedb-napi -p hivedb-py --all-targets --locked --features hivedb-napi/embedder-local,hivedb-py/embedder-local -- -D warnings
 
       - name: Run Rust tests
         run: cargo test --workspace --locked
@@ -321,10 +321,285 @@ jobs:
               done &&
               bun test test/embedder_local.test.ts'
 
+  # --- Binding Python (PyPI: johpaz-hive-db) ---------------------------------------------------------
+  # Una wheel `abi3` por plataforma sirve a Python >= 3.9. Se compilan con el embedder local
+  # (el modelo no viaja en la wheel: se descarga al activarlo).
+  wheels:
+    name: Wheel ${{ matrix.name }}
+    needs: lint-and-test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64-gnu, os: ubuntu-latest, target: x86_64, manylinux: "2_28" }
+          - { name: linux-arm64-gnu, os: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
+          - { name: linux-x64-musl, os: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { name: darwin-x64, os: macos-latest, target: x86_64-apple-darwin }
+          - { name: darwin-arm64, os: macos-latest, target: aarch64-apple-darwin }
+          - { name: win32-x64-msvc, os: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: packages/hive-db-py
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: packages/hive-db-py/dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: sdist
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: packages/hive-db-py
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: packages/hive-db-py/dist/*.tar.gz
+          if-no-files-found: error
+
+  test-python:
+    name: pytest (Python ${{ matrix.python }})
+    needs: wheels
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x64-gnu
+          path: wheels
+
+      - name: Install
+        run: |
+          pip install pytest ruff
+          pip install --no-index --find-links wheels johpaz-hive-db
+
+      - name: Ruff
+        working-directory: packages/hive-db-py
+        run: |
+          ruff check python tests
+          ruff format --check python tests
+
+      - name: pytest
+        working-directory: packages/hive-db-py
+        run: pytest -q
+
+  # Igual que `embedder-e2e`, pero desde Python: descarga el modelo real con la wheel de cada
+  # plataforma y busca por significado. darwin-x64 no tiene runner Intel: solo se compila.
+  python-e2e:
+    name: Python + embedder local en ${{ matrix.triple }}
+    needs: wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: linux-x64-gnu, os: ubuntu-latest }
+          - { triple: linux-arm64-gnu, os: ubuntu-24.04-arm }
+          - { triple: darwin-arm64, os: macos-latest }
+          - { triple: win32-x64-msvc, os: windows-latest }
+          # musl se ejecuta en un contenedor Alpine (el runner es glibc).
+          - { triple: linux-x64-musl, os: ubuntu-latest, alpine: true }
+    env:
+      HIVEDB_MODEL_DIR: ${{ github.workspace }}/.model-cache
+      HIVEDB_E2E_EMBEDDER: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache modelo
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: hivedb-model-614241f6-${{ matrix.triple }}
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-${{ matrix.triple }}
+          path: wheels
+
+      - uses: actions/setup-python@v5
+        if: ${{ !matrix.alpine }}
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        if: ${{ !matrix.alpine }}
+        shell: bash
+        run: |
+          pip install pytest
+          pip install --no-index --find-links wheels johpaz-hive-db
+
+      # Descarga (o confirma en caché) el modelo con la API pública; reintenta una vez.
+      - name: Preparar el modelo (prepare_embedder)
+        if: ${{ !matrix.alpine }}
+        shell: bash
+        run: |
+          for attempt in 1 2; do
+            python -c "from hivedb import HiveDB; print(HiveDB.prepare_embedder(lambda p: None))" && break
+            echo "intento $attempt fallido"; [ "$attempt" = 2 ] && exit 1; sleep 10
+          done
+
+      - name: pytest con el modelo real
+        if: ${{ !matrix.alpine }}
+        working-directory: packages/hive-db-py
+        shell: bash
+        run: pytest -q tests/test_embedder_local.py
+
+      - name: pytest en Alpine (musl)
+        if: ${{ matrix.alpine }}
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w/packages/hive-db-py \
+            -e HIVEDB_MODEL_DIR=/w/.model-cache -e HIVEDB_E2E_EMBEDDER=1 \
+            python:3.12-alpine sh -c '
+              pip install -q pytest &&
+              pip install -q --no-index --find-links /w/wheels johpaz-hive-db &&
+              for attempt in 1 2; do
+                python -c "from hivedb import HiveDB; print(HiveDB.prepare_embedder())" && break
+                [ "$attempt" = 2 ] && exit 1; sleep 10
+              done &&
+              pytest -q tests/test_embedder_local.py'
+
+  # Adaptadores LangChain/LangGraph (paquete aparte, Python puro): se prueban contra la wheel recién
+  # construida y, con el modelo real, que HiveDBStore / HiveDBVectorStore buscan por significado.
+  test-langchain:
+    name: langchain-hivedb
+    needs: wheels
+    runs-on: ubuntu-latest
+    env:
+      HIVEDB_MODEL_DIR: ${{ github.workspace }}/.model-cache
+      HIVEDB_E2E_EMBEDDER: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache modelo
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: hivedb-model-614241f6-linux-x64-gnu
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x64-gnu
+          path: wheels
+
+      - name: Install
+        run: |
+          pip install ruff build
+          pip install --no-index --find-links wheels johpaz-hive-db
+          # --no-deps: la wheel local de hive-db ya está instalada (en un release su versión
+          # coincide con la exigida por el adaptador).
+          pip install --no-deps -e packages/langchain-hivedb
+          pip install langchain-core pytest pytest-asyncio langchain-tests langgraph
+
+      - name: Ruff
+        working-directory: packages/langchain-hivedb
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Preparar el modelo
+        run: |
+          for attempt in 1 2; do
+            python -c "from hivedb import HiveDB; print(HiveDB.prepare_embedder(lambda p: None))" && break
+            echo "intento $attempt fallido"; [ "$attempt" = 2 ] && exit 1; sleep 10
+          done
+
+      - name: pytest
+        working-directory: packages/langchain-hivedb
+        run: pytest -q
+
+      - name: Build
+        working-directory: packages/langchain-hivedb
+        run: python -m build --outdir dist
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: langchain-dist
+          path: packages/langchain-hivedb/dist/*
+          if-no-files-found: error
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint-and-test, test-os, wheels, sdist, test-python, python-e2e, test-langchain]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # Trusted Publishing; si defines el secreto PYPI_API_TOKEN se usa en su lugar
+    steps:
+      - name: Download wheels and sdist
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: List dist
+        run: ls -l dist
+
+      # Idempotente como el publish de npm: lo que ya está en PyPI se omite.
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+      # El adaptador tiene su propio número de versión (packages/langchain-hivedb/pyproject.toml);
+      # si ya está en PyPI se omite.
+      - name: Download langchain-hivedb
+        uses: actions/download-artifact@v4
+        with:
+          name: langchain-dist
+          path: dist-langchain
+
+      - name: Publish langchain-hivedb
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-langchain
+          skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
   publish:
     name: Publish to npm + GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint-and-test, test-os, build, test-bun, embedder-e2e]
+    needs: [lint-and-test, test-os, build, test-bun, embedder-e2e, wheels, sdist, test-python, python-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write

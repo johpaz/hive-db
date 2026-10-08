@@ -11,3 +11,12 @@ packages/hive-db/npm/
 # Salidas crudas de benchmarks (reproducibles con hivedb-bench)
 docs/benchmarks/**/*.txt
 docs/benchmarks/*.txt
+
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+packages/hive-db-py/dist/
+packages/langchain-hivedb/dist/

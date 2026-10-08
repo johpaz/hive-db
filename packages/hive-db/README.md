@@ -2,7 +2,7 @@
 
 Motor de base de datos embebido, local-first y agent-native para agentes de IA: event-log inmutable, proyecciones deterministas, búsqueda híbrida BM25 + vectorial, colecciones de documentos mutables, grafo de consentimiento y suscripciones reactivas — todo en un solo directorio, sin daemon ni dependencias de red.
 
-Núcleo en Rust (`redb` + `tantivy` + HNSW propio), expuesto a Bun/Node vía `napi-rs`.
+Núcleo en Rust (`redb` + `tantivy` + HNSW propio), expuesto a Bun/Node vía `napi-rs`. ¿Usas Python (LangChain, LangGraph)? El mismo motor está en PyPI como [`johpaz-hive-db`](../hive-db-py/README.md), con adaptadores en [`johpaz-langchain-hivedb`](../langchain-hivedb/README.md).
 
 ## Instalación
 
