@@ -159,11 +159,14 @@ fn memoria() -> Memoria {
 /// Lee un fichero de `f32` little-endian fila a fila (`DIMENSION` por fila).
 fn leer_f32(ruta: &Path) -> std::io::Result<Vec<Vec<f32>>> {
     let bytes = std::fs::read(ruta)?;
-    Ok(bytes
-        .chunks_exact(DIMENSION * 4)
+    let (filas, _) = bytes.as_chunks::<{ DIMENSION * 4 }>();
+    Ok(filas
+        .iter()
         .map(|fila| {
-            fila.chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            fila.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect()
         })
         .collect())

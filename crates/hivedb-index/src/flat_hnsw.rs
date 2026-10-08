@@ -52,10 +52,9 @@ const GRAPH_FORMAT: u32 = 1;
 pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     const LANES: usize = 16;
     let mut acc = [0.0f32; LANES];
-    let a_chunks = a.chunks_exact(LANES);
-    let b_chunks = b.chunks_exact(LANES);
-    let (a_tail, b_tail) = (a_chunks.remainder(), b_chunks.remainder());
-    for (x, y) in a_chunks.zip(b_chunks) {
+    let (a_chunks, a_tail) = a.as_chunks::<LANES>();
+    let (b_chunks, b_tail) = b.as_chunks::<LANES>();
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
         for i in 0..LANES {
             acc[i] += x[i] * y[i];
         }
@@ -625,8 +624,10 @@ impl<'a> Cursor<'a> {
         let bytes = self.take(count.checked_mul(4)?)?;
         Some(
             bytes
-                .chunks_exact(4)
-                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b))
                 .collect(),
         )
     }
