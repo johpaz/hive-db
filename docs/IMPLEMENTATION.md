@@ -152,6 +152,8 @@ No expongas `seq` ni `timestamp` en `EventInput`. Hay un test `compile_fail` (`t
 | `text.rs` | `TextIndex` sobre `tantivy`: indexado y BM25. |
 | `hnsw.rs` | `VectorIndex`: ids de documento, tombstones y volcado a disco sobre el grafo plano. |
 | `flat_hnsw.rs` | HNSW propio de almacenamiento plano (`u32` + vectores mapeados con `mmap`), construcción por tandas en paralelo y determinista. |
+| `vector_file.rs` | Fichero plano de vectores normalizados (copia autoritativa) y su vista mapeada en memoria. |
+| `embed.rs` | Trait `Embedder`: lo implementa `hivedb-embed` (`multilingual-e5-small` sobre `candle`). |
 | `rrf.rs` | Fusión Reciprocal Rank. |
 | `index.rs` | `SemanticIndex` orquesta text + vector + RRF. |
 
@@ -210,13 +212,47 @@ Para que una versión anterior no pueda abrir la base migrada y ver un índice v
 se recrea vacía con claves `u64`: abrirla con claves `&str` falla con un error de tipo. No hay vuelta
 atrás automática; para volver a una versión anterior hay que reindexar.
 
-El benchmark reproducible del gate se ejecuta con:
+### HNSW propio (`flat_hnsw.rs`)
 
-```bash
-cargo run -p hivedb-index --release --example g11_semantic_benchmark
-```
+Sustituye a la crate `hnsw_rs`, que dominaba el arranque (~0,9 s con 100k vectores, un objeto por
+vecino al cargar), duplicaba los vectores y obligaba a un `Box::leak` y un `catch_unwind` porque
+hacía `panic!` con ficheros corruptos.
 
-Línea base local del 2026-07-16, build `--release` (no es un umbral de CI): ingestión 10k `988 ms`, consulta HNSW `214 µs`, filtro exacto `5.583 ms`, compactación `997 ms` y reapertura `870 ms`.
+- **Estructura:** `M = 24` vecinos por nodo y capa (el doble en la capa 0), `ef_construction = 100`,
+  nivel geométrico con parámetro `1/ln(M)` derivado del id del nodo (reproducible). El grafo son
+  arrays `u32` (listas de vecinos de capacidad fija y su longitud en `u8`); las capas superiores solo
+  guardan los nodos que las alcanzan. El id de un nodo es su ranura en el fichero de vectores.
+- **Búsqueda:** descenso voraz por las capas altas y búsqueda con cola de prioridad (`ef`) en la capa 0.
+  Conjunto de visitados en un bitset; las distancias, enteros ordenables (los `f32` no negativos
+  conservan su orden por bits). Sólo lee: varias consultas corren a la vez sin bloquearse.
+- **Distancia:** `1 − a·b` sobre vectores normalizados, con un producto punto en `f32` y 16
+  acumuladores independientes que el compilador vectoriza (SSE/AVX/NEON) sin `unsafe`. La
+  `DistCosine` de `anndists` usaba tres acumuladores `f64` por par y no se vectorizaba.
+- **Poda:** heurística de diversidad del paper original (un candidato entra si está más cerca del nodo
+  que de cualquiera de los ya elegidos), rellenando con los descartados hasta la capacidad.
+- **Construcción en paralelo, sin locks y determinista:** los vectores nuevos se enlazan por tandas
+  de ≈ 1/32 de lo ya enlazado (máx. 4.096). En cada tanda se calculan en paralelo (sólo lectura) los
+  vecinos de cada nodo nuevo; después se aplican las aristas directas y las inversas, agrupadas por
+  destino y ordenadas. Ningún hilo escribe mientras otros leen, así que el resultado no depende del
+  número de hilos: la misma entrada da exactamente el mismo grafo (hay un test).
+- **Persistencia:** `hnsw/vectors.hnsw.graph` (sólo el grafo) y `hnsw/vectors.meta` (generación,
+  `space_id`, dimensión, mapa ranura → id y tombstones), que se escribe el último por `rename`. Al
+  cargar se valida todo (longitudes, rangos, que cada vecino llegue a la capa en la que aparece, que
+  el nivel máximo coincida y que el número de nodos coincida con el de ranuras del fichero de
+  vectores); ante cualquier duda se reconstruye. Los volcados con vectores de versiones anteriores
+  se ignoran y su fichero `vectors.hnsw.data` se borra.
+- **Parámetros y su error histórico:** `Hnsw::new` de `hnsw_rs` recibe `(M, max_elements, max_layer,
+  ef_construction)`; los argumentos iban en otro orden y el índice se construía con
+  `ef_construction = 16`, lo que dejaba el recall en 0,43 con `ef = 200`. Con el motor propio los
+  parámetros son constantes con nombre en `hnsw.rs`.
+
+### Rendimiento
+
+El benchmark reproducible vive en `crates/hivedb-bench` (los comparadores de Python, en
+`comparadores/`). Con 100.000 documentos de 384 dimensiones y `ef = 200`: vector p50 0,6–0,8 ms, p99
+1,2–1,6 ms, recall@10 0,996, híbrido 1,6–1,9 ms, ingesta ~8.000 docs/s, apertura ~40 ms, cierre
+~50 ms, 204 MiB en disco. Las curvas de `ef`, la comparación con sqlite-vec y LanceDB y los comandos
+exactos están en [`BENCHMARKS.md`](BENCHMARKS.md). Si cambias el motor vectorial, vuelve a medir.
 
 ### Filtros escalares
 

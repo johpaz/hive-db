@@ -1,0 +1,8 @@
+# libsql docs=100000 consultas=1000 dim=384 k=10
+ingesta_docs_por_s=524
+vector_p50_us=3966 vector_p99_us=6609
+recall_at_10=0.1571
+arranque_en_frio_ms=5
+disco_mib=734.5
+rss_mib=336.8 rss_anon_mib=316.8 rss_file_mib=20.0
+motor_rss_anon_mib=153.0 motor_rss_file_mib=5.0

@@ -1,0 +1,8 @@
+# lancedb-hnsw docs=100000 consultas=1000 dim=384 k=10
+ingesta_docs_por_s=9496
+vector_p50_us=2046 vector_p99_us=3490
+recall_at_10=0.5897
+arranque_en_frio_ms=89
+disco_mib=203.0
+rss_mib=889.6 rss_anon_mib=831.7 rss_file_mib=57.9
+motor_rss_anon_mib=667.9 motor_rss_file_mib=42.9

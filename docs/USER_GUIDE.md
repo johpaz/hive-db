@@ -191,7 +191,19 @@ await db.upsertDoc({
 await db.upsertBatch(docs);
 ```
 
-El vector es opcional. Hay dos formas de obtenerlo: que HiveDB lo genere (embedder local, abajo) o aportar el tuyo.
+El vector es opcional. Hay dos formas de obtenerlo, y puedes elegir la que encaje con tu caso:
+
+| | Embedder local (recomendado) | Vectores propios (modelo local o API) |
+|---|---|---|
+| Quién calcula el embedding | HiveDB, con `multilingual-e5-small` | Tú, con cualquier modelo o proveedor (OpenAI, Cohere, Voyage, un servidor propio…) |
+| Configuración | `embedder: "local"` | `vector: { dimension, spaceId }` y `vector` en cada documento y consulta |
+| Privacidad | El texto no sale de tu máquina | Con una API, el texto se envía a ese proveedor |
+| Red | Solo la descarga única del modelo (opcional, ver abajo) | La que necesite tu proveedor |
+| Coste y velocidad | Sin coste por consulta; ~47 documentos/s en CPU | Según el proveedor; suele ser más rápido en lotes grandes |
+
+Recomendamos el embedder local porque mantiene la memoria del agente en tu máquina, pero HiveDB
+funciona igual de bien con vectores de una API: el motor no distingue de dónde vienen. No se pueden
+mezclar modelos en una misma base (ver `VECTOR_SPACE_MISMATCH`).
 
 #### Embedder local (sin configurar vectores)
 
@@ -205,15 +217,45 @@ await db.queryHybrid({ text: "correo electrónico", k: 3 }); // encuentra "a" au
 ```
 
 - **Modelo:** `intfloat/multilingual-e5-small` (licencia MIT, 384 dimensiones, español, inglés y más). El resultado coincide con el modelo ONNX oficial a ~1e-7 por componente.
-- **Primera apertura:** descarga el modelo (~470 MB) a `~/.cache/hivedb/models` (cambia la ruta con `HIVEDB_MODEL_DIR`). Se verifica con SHA-256 y no se vuelve a descargar. Con `HIVEDB_OFFLINE=1` nunca accede a la red y falla con `EMBEDDER_UNAVAILABLE` si falta el modelo.
+- **Primera apertura:** descarga el modelo (~470 MB) a `~/.cache/hivedb/models` (cambia la ruta con `HIVEDB_MODEL_DIR`). Se verifica con SHA-256 y no se vuelve a descargar. Con `HIVEDB_OFFLINE=1` nunca accede a la red y falla con `EMBEDDER_UNAVAILABLE` si falta el modelo. Esta descarga es la **única excepción** al principio de «cero servicios externos»: es opcional (solo con `embedder: "local"`), puntual y con la revisión del modelo fijada; ver «Instalaciones sin red».
 - **Requiere un binario con el embedder incluido** (feature de Cargo `embedder-local`, +6 MB). Si no, `open` falla con `EMBEDDER_UNAVAILABLE`.
 - **Cómo cambia el comportamiento:** los documentos sin `vector` pero con texto se embeben (`name`, `tags` y `body`); una consulta de texto sin `vector` también busca por significado, así que sus puntuaciones pasan a ser RRF y no BM25 puro. Un `vector` que aportes tú siempre tiene prioridad.
-- **Rendimiento (CPU, 16 núcleos):** ~60 documentos/s al indexar y ~50 ms por consulta de texto. Indexar corpus grandes es lento; para eso puedes aportar tus propios vectores.
+- **Rendimiento (CPU, 16 núcleos):** ~45–60 documentos/s al indexar (frases de Wikipedia de ~130 caracteres: ~47/s) y ~50 ms por consulta de texto. Los textos de un lote se procesan por longitud para no rellenar de más. Indexar corpus grandes es lento; para eso puedes aportar tus propios vectores.
 - **Cambiar de modelo:** una base queda ligada al modelo con que se creó; abrirla con otro falla con `VECTOR_SPACE_MISMATCH`.
+
+#### Instalaciones sin red (air-gapped)
+
+El modelo se puede descargar de antemano y llevarlo a una máquina sin acceso a internet:
+
+```bash
+# 1. En una máquina con red: descargar y verificar el modelo en un directorio
+HIVEDB_MODEL_DIR=./modelo cargo run --release -p hivedb-embed --example fetch_model
+
+# 2. Copiar ./modelo (contiene multilingual-e5-small-614241f6/) a la máquina aislada.
+
+# 3. En la máquina aislada: apuntar a ese directorio y prohibir la red
+export HIVEDB_MODEL_DIR=/ruta/a/modelo
+export HIVEDB_OFFLINE=1
+```
+
+Los tres ficheros del modelo, con las sumas SHA-256 que el motor comprueba al descargar:
+
+| Fichero | Bytes | SHA-256 |
+|---|---:|---|
+| `config.json` | 655 | `69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959` |
+| `tokenizer.json` | 17 082 730 | `0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39` |
+| `model.safetensors` | 470 641 600 | `1a55775f53449dac10a2bcbc312469fac40b96d53198c407081a831f81c98477` |
+
+Al arrancar el motor acepta un fichero ya presente por su tamaño; si lo has copiado a mano, comprueba
+las sumas con `sha256sum`.
+
+El modelo **nunca se distribuye dentro del binario ni de un paquete**: se descarga cuando activas el
+embedder local (`embedder: "local"`), o de antemano con el procedimiento anterior. Quien no activa el
+embedder no descarga nada ni paga su tamaño.
 
 #### Aportar tus propios vectores
 
-Para usar tu propio modelo debes declarar explícitamente un espacio estable al abrir; omitir `vector` deja la base en modo texto:
+Para usar tu propio modelo —local o de una API— debes declarar explícitamente un espacio estable al abrir; omitir `vector` deja la base en modo texto. HiveDB no llama a ningún proveedor por ti: calculas el embedding y se lo pasas:
 
 ```ts
 const db = await HiveDB.open("./data", {
@@ -227,6 +269,52 @@ const db = await HiveDB.open("./data", {
 Documentos y consultas deben producirse con el mismo modelo y configuración representados por `spaceId`. HiveDB rechaza dimensiones distintas, NaN, infinitos y vectores de norma cero.
 
 **Actualizar desde 0.3.x.** Una base creada con 0.3.x abre sin cambios en tu código: su `meta.json` se migra solo y colecciones y event-log quedan intactos. Lo que no sobrevive es el índice semántico —0.3.x no guardaba los documentos en ningún lugar del que se puedan recuperar—, así que después de actualizar vuelve a indexar tus documentos con `upsertBatch`. Si necesitas volver a 0.3.x, la base migrada sigue abriéndose con esa versión.
+
+**Actualizar desde 0.5.x.** Las versiones posteriores a 0.5.x guardan los vectores en un fichero plano
+(`vectors.0.dat`) en vez de dentro de cada documento, lo que reduce el disco a la mitad. Al abrir una
+base de 0.5.x se migra sola (por tandas, reanudable si se interrumpe) y `meta.json` no se modifica.
+Una vez migrada **no se puede abrir con 0.5.x**: esa versión falla con un error de tipo en la tabla
+`semantic_docs` en lugar de ver un índice vacío. Haz una copia del directorio antes de actualizar si
+quieres conservar la posibilidad de volver atrás. Los vectores se guardan normalizados (la métrica es
+coseno), así que no se conserva su magnitud original.
+
+### Rendimiento, precisión y disco
+
+Medido con 100.000 documentos de 384 dimensiones (detalle en [`BENCHMARKS.md`](BENCHMARKS.md)):
+
+| | |
+|---|---|
+| Búsqueda vectorial | ~0,6–0,8 ms (p50), ~1,2–1,6 ms (p99), recall@10 ≈ 0,996 con el `efSearch` por defecto |
+| Búsqueda híbrida (texto + vector) | ~1,6–1,9 ms (p50) |
+| Abrir una base ya poblada | ~40 ms (el grafo y el índice de texto se restauran del disco) |
+| Cerrar | ~50 ms |
+| Disco | ~204 MiB (146 MiB de vectores, 33 MiB de documentos, 20 MiB de grafo, 4 MiB de texto) |
+| Inserción por lotes | ~8 000 documentos/s (usa `upsertBatch`: enlaza el grafo en paralelo) |
+
+El grafo ANN es HNSW. Cada consulta puede ajustar el equilibrio entre precisión y velocidad con
+`efSearch` (por defecto 200); más alto es más preciso y más lento:
+
+```ts
+await db.queryHybrid({ vector, k: 10, efSearch: 100 }); // más rápido, algo menos preciso
+await db.queryHybrid({ vector, k: 10, efSearch: 800 }); // más preciso
+```
+
+| `efSearch` | recall@10 | Vector p50 (100k docs) |
+|---:|---:|---:|
+| 50 | 0,87 | 0,4 ms |
+| 100 | 0,975 | 0,5 ms |
+| **200** (defecto) | 0,996 | 0,6 ms |
+| 400 | 0,997 | 1,0 ms |
+| 800 | 0,998 | 1,4 ms |
+
+Estas cifras son con vectores sintéticos agrupados; con tus embeddings el recall puede variar, así
+que mide con tus datos antes de bajar `efSearch`. Para indexar muchos documentos usa `upsertBatch`
+en lugar de `upsertDoc` en un bucle: es mucho más rápido.
+
+Los vectores se guardan una sola vez, en un fichero plano (`vectors.0.dat`), y **normalizados**: la
+métrica es coseno, así que no se conserva su magnitud original. Actualizar o borrar un documento deja
+su vector antiguo como espacio muerto; cuando es el 25 % o más (y al menos 1.024 vectores) se
+compacta solo, o puedes forzarlo con `compactIndex()`.
 
 ### Consultar
 
@@ -259,7 +347,7 @@ El parsing del texto es tolerante: comillas sin cerrar, operadores y signos de p
 await db.deleteDoc("tool:send_email");                       // por id
 await db.deleteByFilter({ field: "server_id", value: "a" }); // por filtro (p. ej. hot-reload MCP)
 await db.clearIndex();                                       // vaciar todo el índice
-await db.compactIndex();                                     // reconstruir índices derivados
+await db.compactIndex();                                     // reescribir los vectores sin espacio muerto y reconstruir los índices derivados
 ```
 
 `HiveDB.open(":memory:")` abre una base efímera (ideal para tests) con el índice semántico completo.
@@ -505,6 +593,7 @@ interface HybridQuery {
   filters?: ScalarFilter[];
   fusion?: { kind: "rrf"; k?: number };
   boosts?: { name?: number; body?: number; tags?: number };
+  efSearch?: number; // precisión/velocidad del ANN (por defecto 200)
 }
 
 interface ScalarFilter {

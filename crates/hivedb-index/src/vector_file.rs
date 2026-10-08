@@ -25,6 +25,11 @@
 //! un slice, sin locks. Al publicar se crea otra vista sobre el fichero ya
 //! ampliado; las vistas antiguas siguen siendo válidas mientras alguien las use.
 
+// Los ficheros se escriben en little-endian y se leen con `bytemuck::cast_slice`
+// (orden nativo): en un objetivo big-endian se corromperían los datos en silencio.
+#[cfg(target_endian = "big")]
+compile_error!("HiveDB solo admite objetivos little-endian (los vectores se mapean sin convertir)");
+
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

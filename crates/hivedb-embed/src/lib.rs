@@ -158,13 +158,23 @@ impl Embedder for LocalEmbedder {
             EmbedKind::Document => "passage: ",
             EmbedKind::Query => "query: ",
         };
-        let prefixed: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
-        let mut out = Vec::with_capacity(texts.len());
-        for chunk in prefixed.chunks(BATCH_SIZE) {
-            out.extend(
-                self.embed_batch(chunk)
-                    .map_err(|e| fail("generando embeddings", e))?,
-            );
+        // Se procesa por longitud creciente: un lote se rellena hasta su texto más
+        // largo, y mezclar frases cortas con largas desperdicia la mayor parte
+        // del cálculo. El resultado se devuelve en el orden de entrada.
+        let mut order: Vec<usize> = (0..texts.len()).collect();
+        order.sort_by_key(|&i| texts[i].len());
+        let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
+        for chunk in order.chunks(BATCH_SIZE) {
+            let batch: Vec<String> = chunk
+                .iter()
+                .map(|&i| format!("{prefix}{}", texts[i]))
+                .collect();
+            let vectors = self
+                .embed_batch(&batch)
+                .map_err(|e| fail("generando embeddings", e))?;
+            for (&i, vector) in chunk.iter().zip(vectors) {
+                out[i] = vector;
+            }
         }
         Ok(out)
     }

@@ -53,6 +53,21 @@ La estrategia usa `@napi-rs/cli` 3.x: un paquete principal en TypeScript/JavaScr
 | `@johpaz/hive-db-darwin-arm64` | macOS Apple Silicon |
 | `@johpaz/hive-db-win32-x64-msvc` | Windows x64 |
 
+
+### Tamaño del binario
+
+Medido en `linux-x64-gnu`, build `--release` por defecto (sin el embedder local):
+
+| Versión | Binario |
+|---|---:|
+| Con `hnsw_rs` | 13,0 MB |
+| Con el HNSW propio (`flat_hnsw`) | **10,0 MB** |
+
+El embedder local (`--features embedder-local`) añadía ~6 MB al binario con `hnsw_rs`; no se ha vuelto a
+medir con el motor actual. El resto de plataformas no se han medido todavía. El motor vectorial usa
+`memmap2` (mapeo de memoria) y `rayon`; en Windows el fichero de vectores se escribe con `seek_write`,
+camino que aún no se ha ejercitado en CI.
+
 El loader `native.cjs` (generado por `napi build --platform`) detecta la plataforma en runtime —incluyendo la distinción glibc vs musl— y carga el binario correcto desde el subpaquete instalado o desde el archivo local de desarrollo.
 
 El consumidor final solo hace:

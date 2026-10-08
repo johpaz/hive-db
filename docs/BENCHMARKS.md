@@ -29,7 +29,7 @@ realmente en la capa vectorial: **sqlite-vec** y **LanceDB**. Las salidas crudas
 
 | Motor | Ingesta (docs/s) | Vector p50 | Vector p99 | recall@10 | Arranque en frío | Disco | RSS |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **HiveDB** (HNSW, M=24, ef=200) | 7 815 | 0,6–0,8 ms | 1,2–1,6 ms | 1,00 | 39 ms | 203,9 MiB | 606 MiB |
+| **HiveDB** (HNSW, M=24, ef=200) | 7 815 | 0,6–0,8 ms | 1,2–1,6 ms | 0,996 | 39 ms | 203,9 MiB | 606 MiB |
 | sqlite-vec (exacto) | 109 436 | 65,5 ms | 67,6 ms | 1,00 | 67 ms | 149,4 MiB | 186 MiB |
 | LanceDB flat (exacto) | 76 157 | 162,2 ms | 170,9 ms | 1,00 | 190 ms | 146,7 MiB | 1 512 MiB |
 | LanceDB IVF_HNSW_SQ (defecto) | 11 995 | 1,8 ms | 2,4 ms | 0,51 | 79 ms | 203,2 MiB | 953 MiB |
@@ -43,7 +43,7 @@ Los parámetros por defecto de LanceDB dan poco recall; ajustado se compara abaj
 
 | Motor | Ingesta (docs/s) | Vector p50 | Vector p99 | recall@10 | Arranque en frío | Disco | RSS |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **HiveDB** (HNSW, M=24, ef=200) | 14 616 | 0,6 ms | 1,1–1,3 ms | 1,00 | 5 ms | 21,6 MiB | 96 MiB |
+| **HiveDB** (HNSW, M=24, ef=200) | 14 616 | 0,6 ms | 1,1–1,3 ms | 0,998 | 5 ms | 21,6 MiB | 96 MiB |
 | sqlite-vec (exacto) | 87 075 | 6,7 ms | 8,4 ms | 1,00 | 8 ms | 15,3 MiB | 53 MiB |
 | LanceDB flat (exacto) | 9 885 | 9,5 ms | 15,4 ms | 1,00 | 25 ms | 14,7 MiB | 613 MiB |
 | LanceDB IVF_HNSW_SQ (defecto) | 6 847 | 1,8 ms | 2,7 ms | 0,89 | 10 ms | 20,2 MiB | 359 MiB |

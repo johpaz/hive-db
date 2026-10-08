@@ -55,9 +55,17 @@ db.close();
 | Grafo de consentimiento / intent audit | proyección sobre el event log |
 | Suscripciones reactivas | push, no polling |
 
+## Rendimiento
+
+Con 100.000 documentos de 384 dimensiones (vectores sintéticos, una máquina de 16 hilos): búsqueda
+vectorial ~0,6–0,8 ms (p50) con recall@10 ≈ 0,996, búsqueda híbrida ~1,6–1,9 ms, apertura de una base
+poblada ~40 ms, inserción por lotes ~8.000 documentos/s y 204 MiB en disco. Cada consulta puede ajustar
+precisión y velocidad con `efSearch` (por defecto 200). Metodología, comparación con sqlite-vec y
+LanceDB y comandos para reproducirlo: [`docs/BENCHMARKS.md`](https://github.com/johpaz/hive-db/blob/main/docs/BENCHMARKS.md).
+Historial de cambios: [`CHANGELOG.md`](https://github.com/johpaz/hive-db/blob/main/CHANGELOG.md).
+
 ## Documentación completa
 
-- [`SPEC.md`](https://github.com/johpaz/hive-db/blob/main/SPEC.md) — especificación del motor y arquitectura de capas.
 - [`docs/USER_GUIDE.md`](https://github.com/johpaz/hive-db/blob/main/docs/USER_GUIDE.md) — guía de uso desde Bun/TypeScript, con ejemplos de cada API.
 - [`docs/IMPLEMENTATION.md`](https://github.com/johpaz/hive-db/blob/main/docs/IMPLEMENTATION.md) — manual de implementación y extensión del motor.
 - [`docs/DISTRIBUTION.md`](https://github.com/johpaz/hive-db/blob/main/docs/DISTRIBUTION.md) — cómo se distribuyen los binarios multiplataforma.

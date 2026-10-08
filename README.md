@@ -1,77 +1,74 @@
 # HiveDB
 
-Motor de base de datos embebido, local-first y agent-native — pensado para ser el motor de
-memoria/persistencia de cualquier runtime de agentes; hoy usado por el ecosistema Hive.
+**La base de datos de memoria para agentes de IA, embebida en tu proceso.**
 
-HiveDB modela el estado como un **event-log append-only inmutable** sobre el que se derivan proyecciones deterministas. Está diseñado para correr in-process (primero en Bun vía napi-rs, luego nativo Rust), sin daemon ni dependencias de red.
+HiveDB guarda lo que un agente hace, sabe y tiene permitido hacer —eventos, hechos, documentos,
+permisos— y se lo devuelve cuando lo necesita: por orden, por palabras, por significado o por
+causa. Corre dentro de tu aplicación (Bun/Node o Rust), en un único directorio, sin servidor y
+sin depender de ningún servicio externo.
 
-## Documentación
+```ts
+import { HiveDB } from "@johpaz/hive-db";
 
-| Archivo | Contenido |
+const db = await HiveDB.open("./data/mi-agente", { embedder: "local" });
+
+// Lo que el agente hace: un log inmutable. El motor asigna el orden.
+await db.append({
+  agentId: "asistente",
+  streamId: "viaje-a-paris",
+  kind: "Fact",
+  payload: JSON.stringify({ presupuesto: 1200 }),
+});
+
+// Lo que el agente sabe: búsqueda por palabras y por significado a la vez.
+await db.upsertDoc({ id: "politica", body: "Cómo solicitar la devolución de dinero" });
+const hits = await db.queryHybrid({ text: "reembolso", k: 3 }); // encuentra "politica"
+
+// Lo que el agente puede hacer: permisos con auditoría.
+const decision = await db.can("asistente", "read", "viajes/paris");
+```
+
+## Por qué HiveDB
+
+Un agente que dura más que una conversación necesita memoria de verdad, no un `JSON` en disco ni
+una base vectorial pegada a otra base de datos. HiveDB junta en un solo motor lo que ese agente
+suele acabar montando con tres o cuatro piezas:
+
+| Necesidad del agente | En HiveDB |
 |---|---|
-| `SPEC.md` | Especificación del motor, principios de diseño y arquitectura de capas. |
-| `TDD.md` | Contratos de test por fase (roadmap G1-G11). |
-| `docs/USER_GUIDE.md` | Manual de uso desde Bun/TypeScript. |
-| `docs/IMPLEMENTATION.md` | Manual de implementación y extensión del motor. |
-| `docs/AGENT_INTEGRATION.md` | Contrato de eventos para integrar un runtime de agentes con el harness de larga duración (G9) — hiveCode es el primer consumidor de referencia, no el único soportado. |
-| `docs/DISTRIBUTION.md` | Cómo consumir el paquete y publicarlo en npm con binarios para todos los SO. |
-| `.kimi/plans/` | Planes de implementación aprobados por gate. |
-| `packages/hive-db` | Capa TypeScript consumida por aplicaciones Bun. |
+| **Recordar qué pasó y en qué orden** | Event-log append-only e inmutable. El estado actual es una *proyección* determinista: se puede reconstruir reproduciendo el log. |
+| **Recuperar lo relevante** | Búsqueda híbrida: BM25 (con stemming en español) + vectorial (HNSW) + fusión por rango (RRF), en una sola consulta. |
+| **Poder dar explicaciones** | Cada evento puede apuntar a su causa (`causation`). El *hilo causal* reconstruye por qué el agente decidió algo y detecta bucles de error. |
+| **Limitar lo que hace** | Grafo de consentimiento: delegaciones con alcance y expiración, y un evento de auditoría por cada consulta de permiso. |
+| **Reaccionar** | Suscripciones push, no polling. |
+| **Guardar datos mutables** | Colecciones de documentos con versionado optimista, índices secundarios y lotes atómicos. |
+| **Contexto para el LLM** | `buildAgentContext` arma ventanas de contexto que nunca exceden el límite de tokens, comprimiendo las fases terminadas. |
+| **Memoria de trabajo** | Clave-valor en RAM con TTL. |
 
-## Arquitectura
+Los embeddings, a tu elección: con `embedder: "local"` (**recomendado**) el motor los genera a partir
+del texto con `multilingual-e5-small` (español e inglés, en CPU, sin enviar nada fuera); o los
+calculas tú con el modelo o la API que prefieras (OpenAI, Cohere, Voyage, un servidor propio…) y se
+los pasas en `vector`. Con una API, el texto sale hacia ese proveedor: por eso recomendamos el local.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Capa TS (@johpaz/hive-db)  — API ergonómica para Bun   │
-│  open(), append(), query(), subscribe(), project()      │
-└───────────────────────────┬─────────────────────────────┘
-                            │ napi-rs (C ABI)
-┌───────────────────────────┴─────────────────────────────┐
-│  Núcleo Rust (hivedb-core)                              │
-│  ┌────────────┐  ┌─────────────┐  ┌──────────────────┐ │
-│  │ Event Log  │  │ Projections │  │ Reactive Engine  │ │
-│  │ (append)   │→ │ (state)     │← │ (triggers/subs)  │ │
-│  └─────┬──────┘  └──────┬──────┘  └────────┬─────────┘ │
-│        │                │                  │            │
-│  ┌─────┴────────────────┴──────────────────┴─────────┐ │
-│  │              Memory Tiers                          │ │
-│  │  Working (RAM/TTL) · Episodic (log) · Semantic     │ │
-│  └────────────────────────────────────────────────────┘ │
-│        │              │                  │              │
-│  ┌─────┴──────┐ ┌─────┴──────┐  ┌────────┴─────────┐   │
-│  │ redb (KV)  │ │ tantivy    │  │ HNSW (vector)    │   │
-│  │ log+state  │ │ (BM25/FTS) │  │ (ANN/semantic)   │   │
-│  └────────────┘ └────────────┘  └──────────────────┘   │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │ Consent Graph (delegación / intent audit)        │  │
-│  └──────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────┘
-```
+## Rendimiento
 
-## Comparación con otros motores
-
-HiveDB es un motor embebido de memoria para agentes: log de eventos inmutable, proyecciones,
-motor reactivo, grafo de consentimiento y búsqueda híbrida (BM25 + vector + RRF). Sus rivales
-reales son las capas de memoria para agentes y los motores vectoriales embebidos.
-
-**Medido** (100 000 documentos, dim 384, k=10, datos sintéticos; detalle y límites en
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)):
+Medido con 100.000 documentos de 384 dimensiones, k = 10, una sola máquina (Ryzen 9 6900HX).
+Los vectores son sintéticos y agrupados; el detalle, las curvas y los comandos para reproducirlo
+están en [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 | | Vector p50 | recall@10 | Arranque en frío | Disco | Búsqueda híbrida |
 |---|---:|---:|---:|---:|:---:|
-| **HiveDB** (HNSW) | 0,6–0,8 ms | 1,00 | 39 ms | 204 MiB | Sí (1,6–1,9 ms p50) |
+| **HiveDB** (HNSW) | 0,6–0,8 ms | 0,996 | 39 ms | 204 MiB | Sí (1,6–1,9 ms p50) |
 | sqlite-vec (exacto) | 65,5 ms | 1,00 | 67 ms | 149 MiB | No |
 | LanceDB (exacto) | 162,2 ms | 1,00 | 190 ms | 147 MiB | No |
 | LanceDB (IVF_HNSW_SQ, ajustado) | 2,4 ms | 0,95 | 79 ms | 203 MiB | No |
 
-A igual recall, la búsqueda vectorial de HiveDB es más rápida que la de LanceDB ajustado
-(0,975 de recall en 0,5 ms frente a 0,95 en 2,4 ms), arranca en ~40 ms y ocupa lo mismo que
-LanceDB con HNSW. Honestidad por delante: HiveDB **ocupa ~1,4× el disco de sqlite-vec e ingiere
-más despacio (~8k docs/s frente a 12k–109k)**. A cambio ofrece el log causal, el
-consentimiento y la búsqueda híbrida que los otros no tienen. Detalle, curvas de `ef` y
-mejoras pendientes en `docs/BENCHMARKS.md`.
+A igual recall la búsqueda vectorial de HiveDB es más rápida que la de LanceDB ajustado.
+Honestidad por delante: HiveDB **ocupa ~1,4× el disco de sqlite-vec e ingiere más despacio
+(~8k docs/s frente a 12k–109k)**, porque además indexa texto, mantiene el log y construye el grafo
+al insertar. Son datos sintéticos de una máquina: con embeddings reales el recall puede diferir.
 
-**Comparación cualitativa** (no medida; según la documentación pública de cada proyecto):
+## Cómo se compara
 
 | | Enfoque | Dependencias típicas |
 |---|---|---|
@@ -82,97 +79,117 @@ mejoras pendientes en `docs/BENCHMARKS.md`.
 | **LanceDB / sqlite-vec** | Almacén vectorial embebido | Ninguna; sin log causal ni consentimiento |
 | **Turso (vectores)** | SQLite/libSQL con tipo vectorial | Pendiente de medir |
 
-## Crates
+La comparación cualitativa sale de la documentación pública de cada proyecto, no de mediciones
+propias. HiveDB no extrae recuerdos con un LLM ni es un framework de agentes: es el motor de
+memoria que se usaría debajo de uno.
 
-- **`hivedb-core`** — motor de event-log, proyecciones, memoria de trabajo, motor reactivo y grafo de consentimiento.
-- **`hivedb-index`** — índice semántico híbrido: BM25 (`tantivy`) + ANN (HNSW propio) + RRF propio.
-- **`hivedb-embed`** — embedder local opcional (`multilingual-e5-small` sobre `candle`); ver `docs/USER_GUIDE.md`.
-- **`hivedb-bench`** — benchmarks reproducibles ([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)).
-- **`hivedb-napi`** — binding napi-rs que expone `HiveDB` a Bun/Node.
-- **`packages/hive-db`** — envoltorio TypeScript (`@johpaz/hive-db`) con tipos y async iterators.
+## Instalación
 
-## Estado actual
+```bash
+bun add @johpaz/hive-db        # o: npm install @johpaz/hive-db / pnpm add @johpaz/hive-db
+```
 
-- ✅ Fase 0: workspace Rust y CI mínima.
-- ✅ G1: Event Log append-only sobre `redb`, `seq` monotónico asignado por el motor.
-- ✅ G2: Proyecciones deterministas (`CurrentFacts`, `TaskState`) con replay idéntico.
-- ✅ G3: Working memory con TTL (`DashMap`).
-- ✅ G4: Semantic memory híbrida (`tantivy` + HNSW propio + RRF).
-- ✅ G5: Reactive engine con suscripciones push.
-- ✅ G6: Consent Graph (`can()`, `IntentLogged`, expiración controlada).
-- ✅ G7: Concurrencia particionada por `agent_id` + test `loom`.
-- ✅ G8: napi-rs binding + capa TypeScript (`@johpaz/hive-db`).
-- ✅ G9: Harness de larga duración (`CausalThread`, `buildAgentContext`, `HarnessLoop`): memoria causal de tareas, ventanas de contexto adaptativas y evaluación de proceso.
-- ✅ G10: Distribución multiplataforma con `@napi-rs/cli` (6 targets: linux x64 gnu/musl, linux arm64, macOS x64/arm64, Windows x64).
-- ✅ G11: Colecciones de documentos (CRUD mutable sobre `redb`): versionado optimista, índices secundarios de igualdad (con `unique`), scan con prefijo/orden/limit y batches atómicos multi-colección.
-- ✅ G11b: Integridad semántica: documentos autoritativos en `redb`, espacio vectorial explícito, validación estricta, filtros exactos y compactación HNSW.
+Trae binarios precompilados para Linux x64 (glibc y musl), Linux arm64, macOS x64/arm64 y
+Windows x64: no necesitas Rust instalado. La guía de uso, con ejemplos de cada API, está en
+[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
 
-> Nota sobre numeración: los tests de colecciones se llaman `g9_collections.rs`/`g9_collections.test.ts` por una colisión histórica con la numeración del README; el gate funcional de colecciones es G11.
+> **Embedder local.** `embedder: "local"` necesita un binario compilado con la feature
+> `embedder-local` (+6 MB). El modelo (~470 MB) no viaja con el paquete: se descarga la primera vez
+> que lo activas, la única conexión de red del motor; con `HIVEDB_OFFLINE=1` nunca la hace y se puede preparar de antemano para máquinas
+> sin red. Los paquetes publicados todavía no incluyen la feature; mientras tanto puedes aportar
+> tus propios vectores, de un modelo local o de una API (`vector: { dimension, spaceId }`), o compilar
+> el binding con `--features embedder-local`. Ver la sección 5 de la guía.
 
-## Requisitos
+## Arquitectura
 
-- Rust **1.96.0** o superior (ver `rust-toolchain` si existe).
-- `cargo`, `rustfmt`, `clippy`.
-- Para tests de loom: `loom` se resuelve automáticamente via `cargo`.
+```
+┌──────────────────────────────────────────────────────────┐
+│  @johpaz/hive-db (TypeScript)   open · append · query …  │
+└────────────────────────────┬─────────────────────────────┘
+                             │ napi-rs
+┌────────────────────────────┴─────────────────────────────┐
+│  Núcleo Rust                                             │
+│                                                          │
+│  Event log ──▶ Proyecciones ──▶ Motor reactivo           │
+│  (un shard      (hechos, tareas,   (suscripciones push)  │
+│   redb por       herramientas,                           │
+│   agente)        consentimiento)                         │
+│                                                          │
+│  Colecciones     Memoria de trabajo      Harness causal  │
+│  (redb)          (RAM + TTL)             (hilo, contexto)│
+│                                                          │
+│  Memoria semántica híbrida                               │
+│    texto: tantivy (BM25)                                 │
+│    vector: HNSW propio sobre un fichero plano mapeado    │
+│    fusión: RRF        embedder opcional: candle          │
+└──────────────────────────────────────────────────────────┘
+```
 
-## Construcción
+Todo vive en un directorio: `redb` para el log, las colecciones y los documentos; un fichero
+plano con los vectores; y los índices derivados (texto y grafo), que se reconstruyen solos si
+faltan. El log es la fuente de verdad. Los detalles del formato, la recuperación tras un fallo y
+la migración están en [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
+
+## Principios de diseño
+
+1. **Soberanía digital:** cero dependencia de servicios externos en funcionamiento. Única excepción, opcional y explícita: el embedder local descarga el modelo (~470 MB) una vez, a una revisión fija verificada con SHA-256; después no necesita red, y la descarga se puede hacer de antemano para instalaciones aisladas (ver la guía, §5).
+2. **El log es la fuente de verdad:** todo estado es una proyección derivada y reproducible.
+3. **Embebido:** corre dentro del proceso consumidor, sin daemon.
+4. **Agent-native:** consentimiento, memoria y reactividad viven en el motor, no se simulan por encima.
+5. **Determinismo:** el mismo log produce el mismo estado.
+6. **`unsafe` mínimo:** solo en las fronteras de mmap y FFI.
+
+## Estado del proyecto
+
+Versión **0.5.x**, antes de la 1.0: la API puede cambiar entre versiones menores, y el formato en
+disco se migra solo al abrir (una base ya migrada no se puede abrir con una versión anterior; ver
+la guía). El motor tiene tests de propiedades, de concurrencia con `loom` y de recuperación tras
+fallos a medias. El historial de hitos está en [`docs/GATES.md`](docs/GATES.md).
+
+Pendiente antes de la 1.0: benchmarks con embeddings reales, incluir el embedder local en los
+paquetes publicados y estabilizar el formato de eventos en disco.
+
+## Documentación
+
+| | |
+|---|---|
+| [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | Guía de uso desde Bun/TypeScript, con ejemplos de cada API. |
+| [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) | Manual de implementación: formato en disco, índices, recuperación, extensión del motor. |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Mediciones, metodología y cómo reproducirlas. |
+| [`docs/AFIRMACIONES.md`](docs/AFIRMACIONES.md) | Qué se puede afirmar de HiveDB (y cómo decirlo): comparación con el stack habitual, afirmaciones verificadas y texto propuesto. |
+| [`docs/AGENT_GUIDE.md`](docs/AGENT_GUIDE.md) | **Cómo usar HiveDB bien en un agente**: qué va en cada sitio, memoria semántica, recetas, operación y plan de adopción por proyecto. |
+| [`docs/AGENT_INTEGRATION.md`](docs/AGENT_INTEGRATION.md) | Contrato de eventos para integrar un runtime de agentes con el harness causal. |
+| [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) | Cómo se construyen y publican los binarios multiplataforma. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Cambios por versión: mejoras de rendimiento, formato en disco y migración. |
+| [`docs/GATES.md`](docs/GATES.md) | Historial de hitos de la construcción del motor. |
+
+## Desarrollo
+
+Requisitos: Rust **1.96** o superior (`cargo`, `rustfmt`, `clippy`) y, para el paquete TypeScript, Bun.
 
 ```bash
 cargo build --workspace --release
-```
 
-## Tests
-
-### Rust
-
-```bash
-# Suite completa (incluye G1-G7)
-cargo test --workspace
-
-# Formato y linting
+# Antes de entregar un cambio
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 
-# Test de concurrencia con loom (model checker)
+# Concurrencia con el model checker loom
 RUSTFLAGS="--cfg loom" cargo test --test g7_concurrency no_data_race_on_seq_assignment
-```
 
-### TypeScript / Bun (G8)
-
-```bash
+# Paquete TypeScript
 cd packages/hive-db
-bun run build:native   # napi build --platform --release + renombra index.js -> native.cjs
-bun test               # §4.11 - §4.11d
+bun run build:native   # compila el binding y genera native.cjs
+bun test
 ```
 
-## CI
+El workspace tiene cinco crates: `hivedb-core` (log, proyecciones, reactividad, consentimiento,
+harness), `hivedb-index` (memoria semántica híbrida), `hivedb-embed` (embedder local opcional),
+`hivedb-napi` (binding para Bun/Node) y `hivedb-bench` (benchmarks reproducibles). Cada hito nuevo
+añade su archivo de tests `gN_*.rs`, registrado en el `Cargo.toml` del crate. Todo el tiempo pasa
+por `Clock`; no se usa `SystemTime::now()` en la lógica del motor.
 
-El workflow `.github/workflows/ci.yml` ejecuta:
+## Licencia
 
-1. `cargo fmt --all -- --check`
-2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo test --workspace`
-4. En un job separado: `bun run build:napi` + `bun test`
-
-## Principios de diseño (no negociables)
-
-1. **Soberanía digital:** cero dependencia de servicios externos.
-2. **Event-log como fuente de verdad:** todo estado es una proyección derivada; el log es append-only e inmutable.
-3. **Embebido in-process:** corre dentro del proceso consumidor.
-4. **Agent-native en el motor:** primitivos del agente viven en Rust, no se simulan arriba.
-5. **`unsafe` minimizado:** solo en fronteras mmap/FFI.
-6. **Determinismo y replay:** el estado debe poder reconstruirse reproduciendo el log desde cero.
-
-## Contribuir
-
-Cada cambio debe mantener verdes:
-
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
-
-Para gates nuevos, seguir el flujo de planificación en `.kimi/plans/` y actualizar este README con el estado.
-
-## Licencia objetivo
-
-Apache-2.0
+[Apache-2.0](LICENSE).

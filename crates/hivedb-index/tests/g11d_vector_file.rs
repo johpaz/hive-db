@@ -202,7 +202,11 @@ fn una_tanda_con_el_mismo_id_conserva_la_ultima_version() {
     assert_eq!(top(&index, 3, 5), vec!["a"]);
 }
 
-fn active_file(dir: &Path) -> std::path::PathBuf {
+/// Fichero de vectores que queda tras reabrir. El motor borra el fichero alterno
+/// sobrante al abrir (en Windows no se puede borrar mientras sigue mapeado, así
+/// que se limpia en la siguiente apertura), por eso se mira después de reabrir.
+fn active_file_after_reopen(dir: &Path) -> std::path::PathBuf {
+    drop(SemanticIndex::open(dir, config()).unwrap());
     let present: Vec<_> = ["vectors.0.dat", "vectors.1.dat"]
         .into_iter()
         .map(|name| dir.join(name))
@@ -227,20 +231,26 @@ fn compactar_reescribe_el_fichero_sin_ranuras_muertas() {
         index.delete(&format!("d{i}")).unwrap();
     }
     assert_eq!(index.vector_stats(), Some((1_900, 76)));
+    assert_eq!(top(&index, 2_000, 1), vec!["d2000"]);
+    drop(index);
     assert_eq!(
-        std::fs::metadata(active_file(dir.path())).unwrap().len(),
+        std::fs::metadata(active_file_after_reopen(dir.path()))
+            .unwrap()
+            .len(),
         HEADER + 1_976 * row_bytes()
     );
-    assert_eq!(top(&index, 2_000, 1), vec!["d2000"]);
 
     // Compactación explícita.
+    let index = SemanticIndex::open(dir.path(), config()).unwrap();
     index.compact().unwrap();
     assert_eq!(index.vector_stats(), Some((1_900, 0)));
+    drop(index);
     assert_eq!(
-        std::fs::metadata(active_file(dir.path())).unwrap().len(),
+        std::fs::metadata(active_file_after_reopen(dir.path()))
+            .unwrap()
+            .len(),
         HEADER + 1_900 * row_bytes()
     );
-    drop(index);
 
     let index = SemanticIndex::open(dir.path(), config()).unwrap();
     assert_eq!(index.vector_stats(), Some((1_900, 0)));
@@ -260,11 +270,7 @@ fn clear_vacia_los_vectores_y_se_puede_seguir_usando() {
     assert_eq!(top(&index, 77, 1), vec!["d77"]);
     drop(index);
 
-    let present: Vec<_> = ["vectors.0.dat", "vectors.1.dat"]
-        .into_iter()
-        .filter(|name| dir.path().join(name).exists())
-        .collect();
-    assert_eq!(present.len(), 1, "{present:?}");
+    active_file_after_reopen(dir.path());
     let index = SemanticIndex::open(dir.path(), config()).unwrap();
     assert_eq!(index.vector_stats(), Some((1, 0)));
     assert_eq!(top(&index, 77, 1), vec!["d77"]);

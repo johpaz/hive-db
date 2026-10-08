@@ -1,0 +1,23 @@
+ef=50 recall_at_10=0.8583 vector_p50_us=523 vector_p99_us=891
+ef=100 recall_at_10=0.9430 vector_p50_us=854 vector_p99_us=1443
+ef=200 recall_at_10=0.9817 vector_p50_us=1422 vector_p99_us=2003
+ef=400 recall_at_10=0.9936 vector_p50_us=2511 vector_p99_us=3540
+ef=800 recall_at_10=0.9984 vector_p50_us=3960 vector_p99_us=5711
+disco_detalle meta.json=0.0
+disco_detalle fts=10.8
+disco_detalle semantic.redb=64.8
+disco_detalle vectors.0.dat=146.5
+disco_detalle hnsw=20.5
+disco_detalle fts.generation=0.0
+# hivedb-bench docs=100000 consultas=1000 dim=384 k=10
+ingesta_docs_por_s=4918
+vector_p50_us=1411 vector_p99_us=1844
+texto_p50_us=2539 texto_p99_us=6999
+hibrida_p50_us=4336 hibrida_p99_us=9505
+recall_at_10=0.9817
+recall_at_10_tras_reabrir=0.9817
+arranque_en_frio_ms=46 vectores_vivos=100000
+cierre_ms=42
+disco_mib=242.5
+rss_mib=617.8 rss_anon_mib=453.9 rss_file_mib=164.0
+reabierto_rss_anon_mib=31.3 reabierto_rss_file_mib=148.1 (tras abrir: anon 31.3, file 1.6)

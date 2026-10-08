@@ -40,10 +40,43 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # El binding publicado se compila con el embedder local: se lintea también así.
+      - name: Run clippy (embedder local)
+        run: cargo clippy -p hivedb-napi --all-targets --locked --features embedder-local -- -D warnings
 
       - name: Run Rust tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  # El índice vectorial usa ficheros mapeados en memoria y rutas específicas de cada
+  # sistema (en Windows no se puede borrar ni renombrar un fichero mapeado). Ubuntu
+  # no ejercita esas rutas: se prueba el crate del índice también en Windows y macOS.
+  test-os:
+    name: Índice en ${{ matrix.os }}
+    needs: lint-and-test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-index-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run index tests
+        run: cargo test -p hivedb-index --locked
 
   build:
     name: Build ${{ matrix.triple }}
@@ -122,9 +155,12 @@ jobs:
         working-directory: packages/hive-db
         shell: bash
         run: |
+          # `embedder-local` incluye el embedder (multilingual-e5-small sobre candle) en
+          # el binario: +~6 MB. El modelo NO viaja en el paquete; se descarga al activarlo.
           bunx napi build --platform --release \
             --target ${{ matrix.target }} \
             --manifest-path ../../crates/hivedb-napi/Cargo.toml \
+            --features embedder-local \
             --output-dir . ${{ matrix.extra_flags }}
 
       - name: Move JS binding
@@ -185,10 +221,65 @@ jobs:
         working-directory: packages/hive-db
         run: bun test
 
+  # Comprueba con el modelo real que el embedder incluido en el binario publicado
+  # funciona de punta a punta (coincide con la referencia ONNX y encuentra por
+  # significado desde Bun). Descarga el modelo (~470 MB) una vez y lo cachea.
+  embedder-e2e:
+    name: Embedder local (modelo real)
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      HIVEDB_MODEL_DIR: ${{ github.workspace }}/.model-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: embedder-e2e-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # La clave lleva la revisión fija del modelo (hivedb-embed/src/download.rs).
+      - name: Cache modelo
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: hivedb-model-614241f6
+
+      - name: Tests del embedder con el modelo real
+        run: cargo test -p hivedb-embed --locked -- --ignored
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        working-directory: packages/hive-db
+        run: bun install --frozen-lockfile
+
+      - name: Download linux-x64-gnu bindings
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-linux-x64-gnu
+          path: packages/hive-db/
+
+      - name: Bun E2E con el binario construido
+        working-directory: packages/hive-db
+        env:
+          HIVEDB_E2E_EMBEDDER: "1"
+        run: bun test test/embedder_local.test.ts
+
   publish:
     name: Publish to npm + GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint-and-test, build, test-bun]
+    needs: [lint-and-test, test-os, build, test-bun, embedder-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write

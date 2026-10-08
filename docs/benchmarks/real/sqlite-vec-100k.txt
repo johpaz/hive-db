@@ -1,0 +1,8 @@
+# sqlite-vec docs=100000 consultas=1000 dim=384 k=10
+ingesta_docs_por_s=88142
+vector_p50_us=71059 vector_p99_us=73942
+recall_at_10=0.9999
+arranque_en_frio_ms=75
+disco_mib=149.4
+rss_mib=180.9 rss_anon_mib=164.6 rss_file_mib=16.3
+motor_rss_anon_mib=0.8 motor_rss_file_mib=1.6

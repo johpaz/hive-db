@@ -127,16 +127,46 @@ fn tamano_dir(path: &Path) -> u64 {
         .sum()
 }
 
-/// RSS actual del proceso en MiB (solo Linux; 0 en otras plataformas).
-fn rss_mib() -> f64 {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("VmRSS:"))
-                .and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())
+/// Memoria residente del proceso en MiB (solo Linux; ceros en otras plataformas).
+#[derive(Clone, Copy)]
+struct Memoria {
+    /// RSS total (`VmRSS`).
+    total: f64,
+    /// Memoria anónima (`RssAnon`): montón y pilas; no se puede descartar sin swap.
+    anonima: f64,
+    /// Páginas de ficheros mapeados (`RssFile`): el sistema las puede liberar y
+    /// volver a leer del disco.
+    ficheros: f64,
+}
+
+fn memoria() -> Memoria {
+    let estado = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let campo = |nombre: &str| -> f64 {
+        estado
+            .lines()
+            .find(|l| l.starts_with(nombre))
+            .and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())
+            .map_or(0.0, |kib| kib / 1024.0)
+    };
+    Memoria {
+        total: campo("VmRSS:"),
+        anonima: campo("RssAnon:"),
+        // En un sistema de ficheros en RAM (tmpfs) el mapeo cuenta como `RssShmem`.
+        ficheros: campo("RssFile:") + campo("RssShmem:"),
+    }
+}
+
+/// Lee un fichero de `f32` little-endian fila a fila (`DIMENSION` por fila).
+fn leer_f32(ruta: &Path) -> std::io::Result<Vec<Vec<f32>>> {
+    let bytes = std::fs::read(ruta)?;
+    Ok(bytes
+        .chunks_exact(DIMENSION * 4)
+        .map(|fila| {
+            fila.chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect()
         })
-        .map_or(0.0, |kib| kib / 1024.0)
+        .collect())
 }
 
 fn us(d: Duration) -> u128 {
@@ -231,10 +261,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0 => rng.vector(),
         n => rng.vector_desde(&centroides[i % n], 0.7),
     };
-    let vectores: Vec<Vec<f32>> = (0..docs).map(|i| generar(&mut rng, i)).collect();
-    let textos: Vec<String> = (0..docs).map(|_| rng.texto(12)).collect();
-    let consultas_vec: Vec<Vec<f32>> = (0..consultas).map(|i| generar(&mut rng, i)).collect();
-    let consultas_txt: Vec<String> = (0..consultas).map(|_| rng.texto(2)).collect();
+    // HIVE_BENCH_CORPUS=dir usa un corpus real ya embebido (vectors.f32, queries.f32
+    // y, opcionalmente, texts.txt / queries.txt con los textos, uno por línea).
+    let (vectores, textos, consultas_vec, consultas_txt, docs, consultas) = if let Ok(dir) =
+        std::env::var("HIVE_BENCH_CORPUS")
+    {
+        let dir = Path::new(&dir);
+        let mut vectores = leer_f32(&dir.join("vectors.f32"))?;
+        let mut consultas_vec = leer_f32(&dir.join("queries.f32"))?;
+        vectores.truncate(docs);
+        consultas_vec.truncate(consultas);
+        let lineas = |nombre: &str, n: usize| -> Vec<String> {
+            std::fs::read_to_string(dir.join(nombre))
+                .map(|t| t.lines().take(n).map(str::to_owned).collect())
+                .unwrap_or_default()
+        };
+        let mut textos = lineas("texts.txt", vectores.len());
+        textos.resize(vectores.len(), String::new());
+        let mut consultas_txt = lineas("queries.txt", consultas_vec.len());
+        consultas_txt.resize(consultas_vec.len(), String::new());
+        let (d, c) = (vectores.len(), consultas_vec.len());
+        (vectores, textos, consultas_vec, consultas_txt, d, c)
+    } else {
+        let vectores: Vec<Vec<f32>> = (0..docs).map(|i| generar(&mut rng, i)).collect();
+        let textos: Vec<String> = (0..docs).map(|_| rng.texto(12)).collect();
+        let consultas_vec: Vec<Vec<f32>> = (0..consultas).map(|i| generar(&mut rng, i)).collect();
+        let consultas_txt: Vec<String> = (0..consultas).map(|_| rng.texto(2)).collect();
+        (
+            vectores,
+            textos,
+            consultas_vec,
+            consultas_txt,
+            docs,
+            consultas,
+        )
+    };
 
     // HIVE_BENCH_EXPORT=ruta vuelca corpus y consultas (f32 little-endian,
     // fila a fila) para que los comparadores usen exactamente los mismos datos.
@@ -303,7 +364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         barrido_ef(&index, &vectores, &consultas_vec, &valores)?;
     }
 
-    let rss_poblado = rss_mib();
+    let rss_poblado = memoria();
     let t = Instant::now();
     drop(index);
     let cierre = t.elapsed();
@@ -337,9 +398,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Memoria del motor aislada de la del arnés (que conserva los vectores y los
+    // documentos de la prueba): se mide el incremento al reabrir y tras consultar.
+    let antes = memoria();
     let t = Instant::now();
     let reabierto = SemanticIndex::open(dir.path(), config)?;
     let arranque = t.elapsed();
+    let tras_abrir = memoria();
+    for consulta in &consultas_vec {
+        reabierto.query_hybrid(
+            HybridQuery::default()
+                .with_vector(consulta.clone())
+                .with_k(K),
+        )?;
+    }
+    let tras_consultar = memoria();
     let vivos = reabierto.vector_stats().map_or(0, |s| s.0);
     let recall_reabierto = recall_at_k(&reabierto, &vectores, &consultas_vec)?;
 
@@ -359,6 +432,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("cierre_ms={}", cierre.as_millis());
     println!("disco_mib={:.1}", disco as f64 / 1_048_576.0);
-    println!("rss_mib={rss_poblado:.1}");
+    // Con el motor poblado (incluye el arnés de la prueba).
+    println!(
+        "rss_mib={:.1} rss_anon_mib={:.1} rss_file_mib={:.1}",
+        rss_poblado.total, rss_poblado.anonima, rss_poblado.ficheros
+    );
+    // Incremento que provoca solo el motor al reabrir la base y tras consultarla.
+    println!(
+        "reabierto_rss_anon_mib={:.1} reabierto_rss_file_mib={:.1} (tras abrir: anon {:.1}, file {:.1})",
+        tras_consultar.anonima - antes.anonima,
+        tras_consultar.ficheros - antes.ficheros,
+        tras_abrir.anonima - antes.anonima,
+        tras_abrir.ficheros - antes.ficheros,
+    );
     Ok(())
 }
