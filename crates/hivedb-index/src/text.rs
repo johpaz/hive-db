@@ -8,7 +8,8 @@ use tantivy::schema::{
     Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions,
 };
 use tantivy::tokenizer::{
-    AsciiFoldingFilter, Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer,
+    AsciiFoldingFilter, Language, LowerCaser, SimpleTokenizer, Stemmer, StopWordFilter,
+    TextAnalyzer,
 };
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Searcher, TantivyError, Term};
 
@@ -61,8 +62,17 @@ fn build_schema() -> Schema {
 }
 
 fn build_analyzer() -> TextAnalyzer {
+    // Las palabras vacías (de, la, que, the, of…) se quitan antes de plegar acentos y
+    // de aplicar el stemmer, porque sus listas van sin plegar. Sin esto, una consulta
+    // en lenguaje natural ("devolución de dinero") casaba con cualquier documento que
+    // contuviera "de", y en la fusión RRF esa coincidencia vale como un primer puesto.
+    // Se filtran español e inglés: los catálogos son bilingües.
     TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(LowerCaser)
+        .filter(
+            StopWordFilter::new(Language::Spanish).expect("lista de palabras vacías en español"),
+        )
+        .filter(StopWordFilter::new(Language::English).expect("lista de palabras vacías en inglés"))
         .filter(AsciiFoldingFilter)
         .filter(Stemmer::new(Language::Spanish))
         .build()

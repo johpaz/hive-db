@@ -1,0 +1,20 @@
+{
+  "name": "colmena",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "La Colmena: visualización 3D en vivo de HiveDB",
+  "scripts": {
+    "dev:server": "bun --watch server/src/index.ts",
+    "start": "bun server/src/index.ts",
+    "typecheck": "tsc --noEmit -p server"
+  },
+  "dependencies": {
+    "@johpaz/hive-db": "file:../../packages/hive-db",
+    "elysia": "^1.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}

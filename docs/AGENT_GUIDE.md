@@ -5,9 +5,9 @@ quiere aprovechar HiveDB a fondo, no solo guardar y leer filas. No repite la ref
 API (eso está en [`USER_GUIDE.md`](USER_GUIDE.md)): explica **qué problema resuelve cada pieza,
 cuándo usarla, cómo diseñar la memoria de un agente y qué errores evitar**.
 
-> **Estado.** Todo lo que sigue funciona hoy salvo lo marcado como *pendiente*. La búsqueda
-> semántica con `embedder: "local"` necesita un binario compilado con la feature
-> `embedder-local`, que los paquetes publicados todavía no incluyen (ver §9).
+> **Estado.** Todo lo que sigue funciona hoy salvo lo marcado como *pendiente*. Los paquetes
+> publicados (desde la 0.6.0) ya incluyen el embedder local; el modelo (~470 MB) se descarga al
+> activarlo, y conviene precargarlo con `HiveDB.prepareEmbedder` (ver §4.4).
 
 ---
 
@@ -151,14 +151,15 @@ Decisiones que se toman **una vez por base**:
   Para cambiar de modelo hay que crear una base nueva o vaciar el índice y reindexar todo.
 - El vector se guarda **normalizado** (la métrica es coseno): no se conserva su magnitud.
 - La descarga del modelo (~470 MB, la primera vez que activas el embedder local) es la única
-  conexión de red del motor. Para máquinas sin red, ver la sección «Instalaciones sin red» de
+  conexión de red del motor. Hazla antes y con progreso: `await HiveDB.prepareEmbedder({ onProgress })`
+  (con reintentos y reanudación; es idempotente, llámala siempre al arrancar). Para máquinas sin red, ver la sección «Instalaciones sin red» de
   [`USER_GUIDE.md`](USER_GUIDE.md).
 
 ### 4.5 Rendimiento: lo que conviene saber
 
 Con 100.000 frases reales de 384 dimensiones ([`BENCHMARKS.md`](BENCHMARKS.md)): búsqueda vectorial
-~1,4 ms, texto ~2,5 ms, híbrida ~4,3 ms, apertura ~46 ms, ~4.900 documentos/s al indexar por lotes y
-~243 MiB en disco. Un catálogo de agente (cientos de documentos) es, por tanto, trivial para el
+~1,4 ms, texto ~0,8 ms, híbrida ~2,8 ms, apertura ~40 ms, ~5.200 documentos/s al indexar por lotes y
+~241 MiB en disco. Un catálogo de agente (cientos de documentos) es, por tanto, trivial para el
 motor; **lo que cuesta de verdad es calcular el embedding**, no buscarlo:
 
 - La consulta de texto con embedder local cuesta ~50 ms de CPU por embeber la frase. Si en cada
@@ -287,7 +288,7 @@ Errores que verás y qué significan:
 |---|---|---|
 | `Database already open` | Otro proceso (o instancia) tiene la base | Un solo propietario (§3.1) |
 | `VECTOR_SPACE_MISMATCH` | Abriste con otro modelo o dimensión distintos de los de la base | Usa el mismo `spaceId`/`embedder`, o reindexa en una base nueva |
-| `EMBEDDER_UNAVAILABLE` | Binario sin la feature, modelo sin descargar u `HIVEDB_OFFLINE=1` sin modelo | Ver §9 y la sección de instalaciones sin red |
+| `EMBEDDER_UNAVAILABLE` | Binario compilado a mano sin la feature, modelo sin descargar y sin red, u `HIVEDB_OFFLINE=1` sin modelo | Precarga con `HiveDB.prepareEmbedder`, o ver «Instalaciones sin red» en la guía de uso |
 | Error de dimensión o vector inválido | Dimensión distinta, NaN o vector nulo | Valida el vector antes de indexar |
 
 ---
@@ -359,14 +360,14 @@ ACE y detección de bucles.
 
 Lista de comprobación, en orden:
 
-1. **Incluir el embedder local en los paquetes publicados** (feature `embedder-local` en el
-   `build` del CI y comprobar que compila en los seis objetivos; hoy el CI no la construye).
-   Sin esto, `embedder: "local"` falla con `EMBEDDER_UNAVAILABLE` y los proyectos solo podrían usar
-   vectores propios.
-2. **Subir la versión a 0.6.0** (el formato en disco cambió: los vectores van en un fichero plano).
-   Los proyectos dependen de `^0.5.1`, que en 0.x **no** admite 0.6.0: actualiza cada repo
-   explícitamente.
-3. **Repetir los benchmarks con embeddings reales** y revisar las cifras de `BENCHMARKS.md`.
+1. **Usar la 0.6.1 o posterior.** Los paquetes publicados ya traen el embedder (la 0.6.1 corrige la
+   fusión híbrida: orden determinista, más candidatos que `k` y palabras vacías fuera). Verifica el modelo
+   en tu entorno con `HiveDB.prepareEmbedder()` antes de abrir la base.
+2. **Subir la dependencia en cada repo** (el formato en disco cambió en la 0.6: los vectores van en un
+   fichero plano). Los proyectos dependen de `^0.5.1`, que en 0.x **no** admite 0.6.x: actualiza cada
+   repo explícitamente.
+3. **Revisar los umbrales de relevancia:** con la búsqueda híbrida las puntuaciones son RRF; calibra con
+   `vectorScore`/`textScore` (ver §4.3).
 4. **Actualizar cada repo y pasar sus pruebas:** hiveCode primero. Prueba además con una copia de
    una base real (las bases del formato anterior se migran solas al abrir, sin vuelta atrás).
 5. **Decidir** la política de retención del log y quién es el propietario de la base en cada

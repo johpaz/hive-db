@@ -652,3 +652,71 @@ fn lote_grande_conserva_semantica_de_upsert_y_borrado() {
         .unwrap();
     assert!(todos.iter().all(|h| h.id != "d6"));
 }
+
+#[test]
+fn la_fusion_premia_al_documento_bien_situado_en_las_dos_listas() {
+    // "a" es el único con coincidencia de texto y el 2.º por vector; "b" es el 1.º por vector
+    // sin texto. Con k = 1, recortar cada lista a su mejor resultado dejaba a "a" y "b" con la
+    // misma puntuación RRF: la fusión debe ver más candidatos y preferir a "a".
+    let dir = tempfile::tempdir().unwrap();
+    let index = SemanticIndex::open(dir.path(), Some(VectorConfig::new(4, "test:4"))).unwrap();
+    index
+        .upsert_batch(&[
+            IndexDoc::new("a")
+                .with_body("alfa")
+                .with_vector(vec![1.0, 0.9, 0.0, 0.0]),
+            IndexDoc::new("b")
+                .with_body("otra cosa")
+                .with_vector(vec![1.0, 0.0, 0.0, 0.0]),
+            IndexDoc::new("c")
+                .with_body("nada que ver")
+                .with_vector(vec![0.0, 1.0, 0.0, 0.0]),
+        ])
+        .unwrap();
+
+    for _ in 0..30 {
+        let hits = index
+            .query_hybrid(
+                HybridQuery::default()
+                    .with_text("alfa")
+                    .with_vector(vec![1.0, 0.0, 0.0, 0.0])
+                    .with_k(1),
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "a");
+        // Y trae las puntuaciones de las dos fuentes aunque "a" no sea 1.º por vector.
+        assert!(hits[0].text_score.is_some() && hits[0].vector_score.is_some());
+    }
+}
+
+#[test]
+fn las_palabras_vacias_no_producen_coincidencias() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = SemanticIndex::open(dir.path(), None).unwrap();
+    index
+        .upsert_batch(&[
+            doc("a", "receta de paella valenciana"),
+            doc("b", "como configurar la cuenta de email"),
+            doc("c", "the refund policy of the shop"),
+        ])
+        .unwrap();
+    let ids = |text: &str| -> Vec<String> {
+        index
+            .query_hybrid(HybridQuery::default().with_text(text).with_k(10))
+            .unwrap()
+            .into_iter()
+            .map(|h| h.id)
+            .collect()
+    };
+
+    // "de" aparece en a y b, pero no cuenta: solo "paella" decide.
+    assert_eq!(ids("paella de"), vec!["a"]);
+    // En inglés igual: "the" y "of" están en c, y "policy" decide.
+    assert_eq!(ids("the policy of"), vec!["c"]);
+    // Una consulta hecha solo de palabras vacías no encuentra nada (antes casaba con todo).
+    assert!(ids("de la").is_empty());
+    assert!(ids("the of").is_empty());
+    // Las palabras con significado siguen funcionando, con o sin acentos.
+    assert_eq!(ids("configuración cuenta"), vec!["b"]);
+}

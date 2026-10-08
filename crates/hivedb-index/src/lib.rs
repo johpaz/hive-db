@@ -11,7 +11,7 @@ pub mod types;
 mod vector_file;
 
 pub use embed::{EmbedKind, Embedder};
-pub use hnsw::{DEFAULT_EF_SEARCH, VectorIndex};
+pub use hnsw::{DEFAULT_EF_SEARCH, TraceStep, VectorIndex, VectorTrace};
 pub use index::SemanticIndex;
 pub use rrf::rrf;
 pub use text::TextIndex;

@@ -199,6 +199,13 @@ fn indice_de_texto_se_restaura_sin_reconstruir() {
     populate(dir.path(), 60);
     // El marcador solo existe tras un cierre limpio.
     assert!(dir.path().join("fts.generation").exists());
+    // 8 bytes de generación + 4 de versión del análisis de texto.
+    assert_eq!(
+        std::fs::read(dir.path().join("fts.generation"))
+            .unwrap()
+            .len(),
+        12
+    );
 
     let reopened = SemanticIndex::open(dir.path(), config()).unwrap();
     // Al abrir se invalida: si el proceso muriera ahora, no quedaría marcador.
@@ -251,6 +258,22 @@ fn indice_de_texto_borrado_con_marcador_valido_se_reconstruye() {
     let dir = tempfile::tempdir().unwrap();
     populate(dir.path(), 20);
     std::fs::remove_dir_all(dir.path().join("fts")).unwrap();
+
+    let reopened = SemanticIndex::open(dir.path(), config()).unwrap();
+    assert_eq!(text_ids(&reopened, "5"), vec!["d5".to_string()]);
+}
+
+#[test]
+fn un_marcador_de_otra_version_del_analisis_se_ignora() {
+    // Un marcador de versiones sin el campo de versión del análisis (8 bytes) no vale: el
+    // texto se tokenizaba distinto y hay que reconstruirlo.
+    let dir = tempfile::tempdir().unwrap();
+    populate(dir.path(), 20);
+    let marker = std::fs::read(dir.path().join("fts.generation")).unwrap();
+    std::fs::write(dir.path().join("fts.generation"), &marker[..8]).unwrap();
+    // Y se simula un índice de texto con otro análisis: vacío.
+    std::fs::remove_dir_all(dir.path().join("fts")).unwrap();
+    std::fs::create_dir_all(dir.path().join("fts")).unwrap();
 
     let reopened = SemanticIndex::open(dir.path(), config()).unwrap();
     assert_eq!(text_ids(&reopened, "5"), vec!["d5".to_string()]);

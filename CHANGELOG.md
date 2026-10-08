@@ -16,11 +16,11 @@ la API puede cambiar entre versiones menores.
 |---|---:|
 | Búsqueda vectorial p50 / p99 (`efSearch` = 200) | 1,4 / 1,8 ms |
 | recall@10 (`efSearch` = 200 / 400) | 0,982 / 0,994 |
-| Búsqueda de texto / híbrida p50 | 2,5 ms / 4,3 ms |
-| Apertura de una base poblada | 46 ms |
-| Cierre limpio | 42 ms |
-| Inserción por lotes | ~4.900 docs/s |
-| Disco | 242,5 MiB |
+| Búsqueda de texto / híbrida p50 | 0,8 ms / 2,8 ms |
+| Apertura de una base poblada | 40 ms |
+| Cierre limpio | 44 ms |
+| Inserción por lotes | ~5.200 docs/s |
+| Disco | 241,2 MiB |
 | Memoria anónima del motor | ~31 MiB (+148 MiB de vectores mapeados) |
 | Binario nativo (linux-x64-gnu, sin el embedder) | 13,0 → 10,0 MB |
 
@@ -34,7 +34,15 @@ Comparación con sqlite-vec, LanceDB y libSQL (Turso embebido) y metodología en
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ### Añadido
-- **Embedder local opcional** (`hivedb-embed`): `embedder: "local"` genera los embeddings a partir del
+- **`HiveDB.prepareEmbedder({ onProgress })`**: descarga y verifica el modelo del embedder local sin abrir
+  ninguna base, con progreso (`{ file, fileIndex, fileCount, downloaded, total }`), y devuelve
+  `{ dir, spaceId, cached }`. Evita la espera silenciosa de ~470 MB en la primera apertura.
+- **Descarga del modelo robusta:** tiempos máximos, hasta 4 reintentos con espera creciente, **reanudación** con
+  `Range` desde donde se cortó, bloqueo entre procesos y verificación de SHA-256. `HIVEDB_MODEL_BASE_URL`
+  permite usar un espejo. Tests con un servidor HTTP local y contra Hugging Face real.
+- **CI:** el test de extremo a extremo del embedder con el modelo real corre ahora en linux x64 glibc, linux
+  arm64, macOS arm64, Windows y linux x64 musl (Alpine), y `publish` depende de toda la matriz.
+- **Embedder local opcional, incluido en los paquetes publicados** (`hivedb-embed`; binarios de 13,7–16,8 MB según la plataforma; los pesos del modelo no viajan en el paquete) : `embedder: "local"` genera los embeddings a partir del
   texto con `multilingual-e5-small` sobre `candle` (Rust puro, sin ONNX Runtime). Descarga verificada
   con SHA-256 a una revisión fija; `HIVEDB_OFFLINE=1` impide el acceso a la red. Feature de Cargo
   `embedder-local` en `hivedb-napi`, apagada por defecto.
@@ -60,6 +68,9 @@ Comparación con sqlite-vec, LanceDB y libSQL (Turso embebido) y metodología en
 - Nombres unificados: producto `HiveDB`, paquete `@johpaz/hive-db`, crates `hivedb-*`, repositorio `hive-db`.
 
 ### Formato en disco y migración
+- **Desde 0.6.0:** el análisis de texto cambió (palabras vacías), así que el índice de texto de una base existente
+  se **reconstruye una vez al abrir**; los datos no se tocan. (Lo gobierna `FTS_ANALYSIS_VERSION`, guardado en
+  `fts.generation`.)
 - Las bases del formato anterior se **migran solas al abrir**: se escribe un fichero `redb` nuevo y solo
   se sustituye al terminar, así que una interrupción deja la base original intacta y se repite;
   `meta.json` no se modifica. Probado con copias de bases reales de Hive (los resultados de búsqueda
@@ -71,6 +82,16 @@ Comparación con sqlite-vec, LanceDB y libSQL (Turso embebido) y metodología en
   corromperían en silencio.
 
 ### Corregido
+- **Búsqueda híbrida no determinista:** con la misma puntuación RRF (muy frecuente, p. ej. con `k = 1`), el orden
+  dependía del orden de un `HashMap` y cambiaba entre ejecuciones. Ahora el desempate es total y reproducible
+  (puntuación, mejor puesto en alguna lista, id). Era la causa del fallo intermitente del test E2E del embedder.
+- **La fusión solo miraba `k` candidatos por fuente,** de modo que un documento 2.º en una lista y 1.º en la otra
+  empataba con los que solo eran 1.º en una. Ahora cada fuente aporta `max(5·k, 50)` candidatos antes de fusionar.
+- **Palabras vacías:** «de», «la», «que», «the», «of»… contaban como coincidencias de texto (y en RRF como un
+  primer puesto), desplazando la coincidencia semántica. Ahora se ignoran en español e inglés.
+  *Efecto en rendimiento (100k frases reales):* búsqueda de texto p50 2,5 → **0,8 ms**, híbrida p50 4,3 → **2,8 ms**
+  (p99 9,5 → 4,4 ms), índice de texto de 10,8 a 9,4 MiB.
+- Lints de `clippy` 1.99 (`as_chunks` en lugar de `chunks_exact` con tamaño constante).
 - **Recall del ANN:** el índice se construía con `ef_construction = 16` en lugar de 200 por pasar los
   argumentos de `Hnsw::new` en otro orden. El recall a 100k pasó de 0,43 a 0,96 solo con corregirlo.
 - `HiveDB::read(seq)` devolvía `NotFound` tras reabrir una base cerrada limpiamente.

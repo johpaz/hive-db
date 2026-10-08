@@ -217,11 +217,36 @@ await db.queryHybrid({ text: "correo electrónico", k: 3 }); // encuentra "a" au
 ```
 
 - **Modelo:** `intfloat/multilingual-e5-small` (licencia MIT, 384 dimensiones, español, inglés y más). El resultado coincide con el modelo ONNX oficial a ~1e-7 por componente.
-- **Primera apertura:** descarga el modelo (~470 MB) a `~/.cache/hivedb/models` (cambia la ruta con `HIVEDB_MODEL_DIR`). Se verifica con SHA-256 y no se vuelve a descargar. Con `HIVEDB_OFFLINE=1` nunca accede a la red y falla con `EMBEDDER_UNAVAILABLE` si falta el modelo. Esta descarga es la **única excepción** al principio de «cero servicios externos»: es opcional (solo con `embedder: "local"`), puntual y con la revisión del modelo fijada; ver «Instalaciones sin red».
-- **Requiere un binario con el embedder incluido** (feature de Cargo `embedder-local`, +6 MB). Si no, `open` falla con `EMBEDDER_UNAVAILABLE`.
+- **Primera apertura:** descarga el modelo (~470 MB) a `~/.cache/hivedb/models` (cambia la ruta con `HIVEDB_MODEL_DIR`). Se verifica con SHA-256 y no se vuelve a descargar. Con `HIVEDB_OFFLINE=1` nunca accede a la red y falla con `EMBEDDER_UNAVAILABLE` si falta el modelo. Esta descarga es la **única excepción** al principio de «cero servicios externos»: es opcional (solo con `embedder: "local"`), puntual y con la revisión del modelo fijada; ver «Precargar el modelo» e «Instalaciones sin red». Para que no sea una espera silenciosa de minutos, descárgalo antes con `HiveDB.prepareEmbedder`.
+- **Incluido en los paquetes publicados** desde la 0.6.0 (el código que ejecuta el modelo: ~7 MB más en el binario nativo, que pesa 13,7–16,8 MB según la plataforma). El modelo en sí no viaja en el paquete. Si compilas el binding tú, hace falta la feature de Cargo `embedder-local`; sin ella, `open` falla con `EMBEDDER_UNAVAILABLE`.
 - **Cómo cambia el comportamiento:** los documentos sin `vector` pero con texto se embeben (`name`, `tags` y `body`); una consulta de texto sin `vector` también busca por significado, así que sus puntuaciones pasan a ser RRF y no BM25 puro. Un `vector` que aportes tú siempre tiene prioridad.
+- **Descarga robusta:** tiene tiempos máximos, reintenta hasta 4 veces con espera creciente y **se reanuda** donde se cortó (sin empezar de cero), y dos procesos que arrancan a la vez no se pisan. Lo que sirve el servidor se comprueba siempre contra el SHA-256 fijado.
+- **Espejos y redes corporativas:** `HIVEDB_MODEL_BASE_URL` sustituye a Hugging Face por otro servidor con la misma estructura (`{base}/config.json`, `{base}/tokenizer.json`, `{base}/model.safetensors`); los SHA-256 se comprueban igual.
 - **Rendimiento (CPU, 16 núcleos):** ~45–60 documentos/s al indexar (frases de Wikipedia de ~130 caracteres: ~47/s) y ~50 ms por consulta de texto. Los textos de un lote se procesan por longitud para no rellenar de más. Indexar corpus grandes es lento; para eso puedes aportar tus propios vectores.
 - **Cambiar de modelo:** una base queda ligada al modelo con que se creó; abrirla con otro falla con `VECTOR_SPACE_MISMATCH`.
+
+#### Precargar el modelo (con progreso)
+
+`HiveDB.prepareEmbedder` descarga y verifica el modelo **sin abrir ninguna base**, avisando del avance.
+Llámalo en el primer arranque de tu aplicación (o en su instalador) y después abre la base con
+`embedder: "local"`, que ya no tendrá que esperar:
+
+```ts
+import { HiveDB } from "@johpaz/hive-db";
+
+const model = await HiveDB.prepareEmbedder({
+  onProgress: ({ file, fileIndex, fileCount, downloaded, total }) => {
+    process.stdout.write(`\r${file} (${fileIndex}/${fileCount}) ${Math.floor((100 * downloaded) / total)}%`);
+  },
+});
+console.log(model.cached ? "modelo ya en caché" : "modelo descargado", model.dir);
+
+const db = await HiveDB.open("./data", { embedder: "local" });
+```
+
+Devuelve `{ dir, spaceId, cached }` (`cached: true` si ya estaba todo y no se descargó nada). Con
+`HIVEDB_OFFLINE=1` y sin el modelo falla con `EMBEDDER_UNAVAILABLE`. Es idempotente y seguro llamarlo
+siempre al arrancar.
 
 #### Instalaciones sin red (air-gapped)
 
@@ -229,7 +254,8 @@ El modelo se puede descargar de antemano y llevarlo a una máquina sin acceso a 
 
 ```bash
 # 1. En una máquina con red: descargar y verificar el modelo en un directorio
-HIVEDB_MODEL_DIR=./modelo cargo run --release -p hivedb-embed --example fetch_model
+HIVEDB_MODEL_DIR=./modelo bun -e 'import { HiveDB } from "@johpaz/hive-db"; console.log(await HiveDB.prepareEmbedder())'
+#    (sin Bun: HIVEDB_MODEL_DIR=./modelo cargo run --release -p hivedb-embed --example fetch_model)
 
 # 2. Copiar ./modelo (contiene multilingual-e5-small-614241f6/) a la máquina aislada.
 
@@ -249,9 +275,9 @@ Los tres ficheros del modelo, con las sumas SHA-256 que el motor comprueba al de
 Al arrancar el motor acepta un fichero ya presente por su tamaño; si lo has copiado a mano, comprueba
 las sumas con `sha256sum`.
 
-El modelo **nunca se distribuye dentro del binario ni de un paquete**: se descarga cuando activas el
-embedder local (`embedder: "local"`), o de antemano con el procedimiento anterior. Quien no activa el
-embedder no descarga nada ni paga su tamaño.
+Los **pesos del modelo nunca se distribuyen dentro del binario ni de un paquete**: el paquete trae el
+código que los ejecuta, y el modelo se descarga cuando activas el embedder local (`embedder: "local"`) o
+de antemano con `prepareEmbedder`. Quien no activa el embedder no descarga nada.
 
 #### Aportar tus propios vectores
 
@@ -286,10 +312,10 @@ Medido con 100.000 frases reales de Wikipedia (384 dimensiones, disco NVMe; deta
 | | |
 |---|---|
 | Búsqueda vectorial | ~1,4 ms (p50), ~2 ms (p99), recall@10 ≈ 0,98 con el `efSearch` por defecto |
-| Búsqueda de texto / híbrida (texto + vector) | ~2,5 ms / ~4,3 ms (p50), con frases enteras como consulta |
-| Abrir una base ya poblada | ~46 ms (el grafo y el índice de texto se restauran del disco) |
-| Cerrar | ~42 ms |
-| Disco | ~243 MiB (146,5 MiB de vectores, 65 MiB de documentos, 20,5 MiB de grafo, 11 MiB de texto) |
+| Búsqueda de texto / híbrida (texto + vector) | ~0,8 ms / ~2,8 ms (p50), con frases enteras como consulta |
+| Abrir una base ya poblada | ~40 ms (el grafo y el índice de texto se restauran del disco) |
+| Cerrar | ~44 ms |
+| Disco | ~241 MiB (146,5 MiB de vectores, 65 MiB de documentos, 20,5 MiB de grafo, 9 MiB de texto) |
 | Inserción por lotes | ~4 900 documentos/s (usa `upsertBatch`: enlaza el grafo en paralelo) |
 | Memoria | ~31 MiB anónimos + ~148 MiB de vectores mapeados desde disco (el sistema los puede liberar) |
 
@@ -306,7 +332,7 @@ await db.queryHybrid({ vector, k: 10, efSearch: 800 }); // más preciso
 | 50 | 0,858 | 0,5 ms |
 | 100 | 0,943 | 0,9 ms |
 | **200** (defecto) | 0,982 | 1,4 ms |
-| 400 | 0,994 | 2,5 ms |
+| 400 | 0,994 | 2,4 ms |
 | 800 | 0,998 | 4,0 ms |
 
 Estas cifras son con frases reales en español e inglés; con tus embeddings el recall puede variar, así
@@ -342,6 +368,12 @@ Puedes consultar solo por texto, solo por vector, o ambos. La semántica del `sc
 | Híbrido | Fusión RRF (`fusion: { kind: "rrf", k: 60 }` configurable); `textScore` y `vectorScore` traen los componentes crudos |
 
 El parsing del texto es tolerante: comillas sin cerrar, operadores y signos de puntuación degradan a una búsqueda bolsa-de-palabras en lugar de fallar.
+
+**Palabras vacías.** Al indexar y al consultar se ignoran las palabras vacías del español y del inglés («de», «la», «que», «the», «of»…): no cuentan como coincidencia. Una consulta hecha solo de palabras vacías no encuentra nada. Se aplican antes de quitar acentos y de aplicar el stemmer (que conserva «transacción» ≈ «transaccion», «pagos» ≈ «pago»).
+
+**Fusión híbrida.** En una consulta con texto y vector, cada fuente aporta más candidatos que `k` (`max(5·k, 50)`) antes de fusionar, de modo que un documento bien situado en las dos listas gana a uno que solo es primero en una. La fusión es **determinista**: ante una misma puntuación gana el documento con mejor puesto en alguna lista y, al final, el id; la misma consulta siempre devuelve el mismo orden.
+
+**Actualizar desde 0.6.0.** El análisis de texto cambió (palabras vacías), así que el índice de texto de una base existente se reconstruye una vez al abrirla con la 0.6.1; los datos no se tocan.
 
 ### Borrar y mantener
 
@@ -647,10 +679,16 @@ class Collection<T = unknown> {
   findBy(field: string, value: string | number | boolean): Promise<DocEntry<T>[]>;
 }
 
+interface ModelProgress { file: string; fileIndex: number; fileCount: number; downloaded: number; total: number }
+interface PreparedEmbedder { dir: string; spaceId: string; cached: boolean }
+
 class HiveDB {
   static open(path: string, options?: {
     vector?: { dimension: number; spaceId: string };
+    embedder?: "local"; // genera los embeddings a partir del texto (ver §5)
   }): Promise<HiveDB>;
+  /** Descarga y verifica el modelo del embedder local, con avance, sin abrir ninguna base. */
+  static prepareEmbedder(options?: { onProgress?: (p: ModelProgress) => void }): Promise<PreparedEmbedder>;
   append(input: EventInput): Promise<number>;
   read(seq: number): Promise<Event>;
   logLen(): Promise<number>;

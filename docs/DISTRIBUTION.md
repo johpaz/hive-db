@@ -4,9 +4,9 @@
 
 ---
 
-## 1. ¿De dónde lo importo HOY? (sin publicar)
+## 1. ¿De dónde lo importo?
 
-El paquete vive en `packages/hive-db` de este monorepo y **aún no está publicado en npm**. Tienes tres formas de consumirlo:
+El paquete está **publicado en npm** como `@johpaz/hive-db` (`bun add @johpaz/hive-db`); para desarrollar contra el código de este monorepo (`packages/hive-db`) tienes tres formas de consumirlo sin publicar:
 
 ### a) Dentro de este monorepo (workspace)
 
@@ -56,17 +56,29 @@ La estrategia usa `@napi-rs/cli` 3.x: un paquete principal en TypeScript/JavaScr
 
 ### Tamaño del binario
 
-Medido en `linux-x64-gnu`, build `--release` por defecto (sin el embedder local):
+Los binarios publicados (desde la 0.6.0) se compilan con `--features embedder-local`, es decir, **incluyen el
+embedder local** (el código que ejecuta el modelo; los pesos de ~470 MB no viajan en el paquete y se descargan al
+activarlo). Tamaño descomprimido de cada paquete de plataforma en npm:
 
-| Versión | Binario |
+| Plataforma | Con embedder (publicado) |
 |---|---:|
-| Con `hnsw_rs` | 13,0 MB |
-| Con el HNSW propio (`flat_hnsw`) | **10,0 MB** |
+| `linux-x64-gnu` | 16,8 MB |
+| `linux-x64-musl` | 14,1 MB |
+| `linux-arm64-gnu` | 15,5 MB |
+| `darwin-x64` | 15,4 MB |
+| `darwin-arm64` | 13,7 MB |
+| `win32-x64-msvc` | 15,5 MB |
 
-El embedder local (`--features embedder-local`) añadía ~6 MB al binario con `hnsw_rs`; no se ha vuelto a
-medir con el motor actual. El resto de plataformas no se han medido todavía. El motor vectorial usa
-`memmap2` (mapeo de memoria) y `rayon`; en Windows el fichero de vectores se escribe con `seek_write`,
-camino que aún no se ha ejercitado en CI.
+Sin el embedder, el binario de `linux-x64-gnu` pesa 10,0 MB (13,0 MB con la crate `hnsw_rs`, que sustituyó
+el HNSW propio): el embedder añade unos 6,8 MB. Si prefieres un binario sin él, compila el binding tú sin la
+feature (`bun run build:native`), y `embedder: "local"` fallará con `EMBEDDER_UNAVAILABLE`. El motor vectorial
+usa `memmap2` (mapeo de memoria) y `rayon`; en Windows el índice se prueba en CI (`test-os`).
+
+### Verificación del embedder por plataforma
+
+Antes de publicar, el job `embedder-e2e` del CI prepara el modelo real con `HiveDB.prepareEmbedder` y ejecuta el
+test de extremo a extremo en **linux x64 glibc, linux arm64, macOS arm64, Windows y linux x64 musl (Alpine)**.
+`darwin-x64` solo se compila: GitHub no ofrece ya runners Intel. `publish` depende de toda esa matriz.
 
 El loader `native.cjs` (generado por `napi build --platform`) detecta la plataforma en runtime —incluyendo la distinción glibc vs musl— y carga el binario correcto desde el subpaquete instalado o desde el archivo local de desarrollo.
 

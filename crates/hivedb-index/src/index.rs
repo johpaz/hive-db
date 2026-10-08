@@ -31,7 +31,15 @@ const DATABASE_META_FILE: &str = "meta.json";
 const GRAPH_DIR: &str = "hnsw";
 /// Generación con la que se cerró limpiamente el índice de texto (`fts/`).
 const FTS_MARKER_FILE: &str = "fts.generation";
+/// Versión del análisis de texto con el que se construyó `fts/`. Súbela cada vez que cambie
+/// cómo se tokeniza (filtros, listas de palabras vacías, stemmer): un índice de otra versión
+/// no es válido y se reconstruye al abrir. (El marcador de versiones sin este campo mide 8
+/// bytes y tampoco coincide.)
+const FTS_ANALYSIS_VERSION: u32 = 2;
 const SCHEMA_VERSION: u32 = 2;
+/// Candidatos por fuente en una consulta híbrida: `k × FUSION_DEPTH_FACTOR`, con un mínimo.
+const FUSION_DEPTH_FACTOR: usize = 5;
+const FUSION_MIN_DEPTH: usize = 50;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DatabaseMeta {
@@ -779,8 +787,21 @@ impl SemanticIndex {
         let state = self.state.read().unwrap();
         let boosts = query.boosts.unwrap_or_default();
 
+        // En una consulta híbrida cada fuente aporta más candidatos que `k` antes de fusionar:
+        // con RRF (que solo mira posiciones), un documento que es 2.º en una lista y 1.º en
+        // la otra debe poder ganar a los que solo son 1.º en una; recortando cada lista a
+        // `k` ese documento se perdería (con `k = 1`, cada fuente aporta solo su mejor).
+        let depth = if query.text.is_some() && query.vector.is_some() {
+            query
+                .k
+                .saturating_mul(FUSION_DEPTH_FACTOR)
+                .max(FUSION_MIN_DEPTH)
+        } else {
+            query.k
+        };
+
         let text_ranking = match &query.text {
-            Some(text) => Some(state.text.search(text, &query.filters, boosts, query.k)?),
+            Some(text) => Some(state.text.search(text, &query.filters, boosts, depth)?),
             None => None,
         };
         let vector_ranking = match &query.vector {
@@ -789,13 +810,13 @@ impl SemanticIndex {
                     .vector
                     .as_ref()
                     .ok_or(crate::IndexError::VectorIndexDisabled)?
-                    .search(vector, query.k, query.ef_search)?,
+                    .search(vector, depth, query.ef_search)?,
             ),
             Some(vector) => Some(self.search_vector_filtered_exact(
                 &state.text,
                 vector,
                 &query.filters,
-                query.k,
+                depth,
             )?),
             None => None,
         };
@@ -806,6 +827,27 @@ impl SemanticIndex {
             query.fusion,
             query.k,
         ))
+    }
+
+    /// Búsqueda vectorial sin filtros que devuelve también la ruta del HNSW.
+    pub fn trace_vector(
+        &self,
+        vector: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> crate::Result<crate::hnsw::VectorTrace> {
+        let config = self
+            .vector_config
+            .as_ref()
+            .ok_or(crate::IndexError::VectorIndexDisabled)?;
+        validate_vector(vector, config.dimension)?;
+        self.ensure_synced()?;
+        let state = self.state.read().unwrap();
+        state
+            .vector
+            .as_ref()
+            .ok_or(crate::IndexError::VectorIndexDisabled)?
+            .search_traced(vector, k, ef_search)
     }
 
     fn search_vector_filtered_exact(
@@ -917,7 +959,9 @@ impl SemanticIndex {
         let base = graph_dir.parent().unwrap_or(graph_dir);
         let marker = base.join(FTS_MARKER_FILE);
         let temp = marker.with_extension("tmp");
-        std::fs::write(&temp, state.generation.to_le_bytes())?;
+        let mut content = state.generation.to_le_bytes().to_vec();
+        content.extend_from_slice(&FTS_ANALYSIS_VERSION.to_le_bytes());
+        std::fs::write(&temp, content)?;
         std::fs::rename(&temp, &marker)?;
         Ok(())
     }
@@ -950,9 +994,13 @@ impl Drop for SemanticIndex {
     }
 }
 
+/// Generación con la que se cerró el índice de texto, si el marcador es válido y se escribió
+/// con la versión de análisis actual.
 fn read_fts_marker(path: &Path) -> Option<u64> {
     let bytes = std::fs::read(path).ok()?;
-    Some(u64::from_le_bytes(bytes.try_into().ok()?))
+    let bytes: [u8; 12] = bytes.try_into().ok()?;
+    let version = u32::from_le_bytes(bytes[8..].try_into().ok()?);
+    (version == FTS_ANALYSIS_VERSION).then(|| u64::from_le_bytes(bytes[..8].try_into().unwrap()))
 }
 
 fn validate_config(config: Option<&VectorConfig>) -> crate::Result<()> {

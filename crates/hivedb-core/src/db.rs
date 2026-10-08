@@ -554,6 +554,20 @@ impl HiveDB {
         semantic.query_hybrid(query).map_err(Into::into)
     }
 
+    /// Búsqueda vectorial (sin filtros) que devuelve además la ruta que
+    /// recorrió el HNSW. Herramienta de diagnóstico y visualización; la ruta
+    /// normal de `query_hybrid` no registra nada.
+    pub fn trace_vector_search(
+        &self,
+        vector: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> HiveResult<hivedb_index::VectorTrace> {
+        self.semantic()?
+            .trace_vector(vector, k, ef_search)
+            .map_err(Into::into)
+    }
+
     /// Subscribe to a pattern of events.
     pub fn subscribe(&self, pattern: EventPattern) -> Subscription {
         self.reactive.subscribe(pattern)

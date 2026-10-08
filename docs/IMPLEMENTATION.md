@@ -16,6 +16,8 @@ hive-db/
 ├── crates/
 │   ├── hivedb-core/           # motor: log, proyecciones, consent, reactivo
 │   ├── hivedb-index/          # índice semántico híbrido
+│   ├── hivedb-embed/          # embedder local opcional (candle) y descarga del modelo
+│   ├── hivedb-bench/          # benchmarks reproducibles (publish = false)
 │   └── hivedb-napi/           # binding napi-rs (cdylib)
 └── packages/
     └── hive-db/               # envoltorio TypeScript para Bun
@@ -25,6 +27,8 @@ hive-db/
 |---|---|---|
 | `hivedb-core` | Event-log sharded, proyecciones deterministas, working memory, motor reactivo, consent graph | `redb`, `dashmap`, `tokio`, `serde_json` |
 | `hivedb-index` | BM25 full-text (`tantivy`), ANN vectorial (HNSW propio), fusión RRF | `tantivy`, `rayon`, `memmap2` |
+| `hivedb-embed` | Embedder local (`multilingual-e5-small`) y descarga/caché verificada del modelo | `candle`, `tokenizers`, `ureq`, `sha2` |
+| `hivedb-bench` | Benchmarks y comparadores (sqlite-vec, LanceDB, libSQL) | — |
 | `hivedb-napi` | Expone `HiveDB` al runtime JS vía napi-rs | `napi`, `napi-derive`, `tokio` |
 | `@johpaz/hive-db` | API ergonómica TypeScript, async iterators, tipos | Bun |
 
@@ -254,11 +258,39 @@ hacía `panic!` con ficheros corruptos.
 
 El benchmark reproducible vive en `crates/hivedb-bench` (los comparadores de Python, en
 `comparadores/`). Con 100.000 frases reales de 384 dimensiones, `ef = 200` y disco NVMe: vector p50
-1,4 ms (p99 ~2 ms), recall@10 0,982, texto 2,5 ms, híbrido 4,3 ms, ingesta ~4.900 docs/s, apertura
-~46 ms, cierre ~42 ms, 242,5 MiB en disco y ~31 MiB de memoria anónima. Las curvas de `ef`, la
+1,4 ms (p99 ~2 ms), recall@10 0,982, texto 0,8 ms, híbrido 2,8 ms, ingesta ~5.200 docs/s, apertura
+~40 ms, cierre ~44 ms, 241,2 MiB en disco y ~31 MiB de memoria anónima. Las curvas de `ef`, la
 comparación con sqlite-vec, LanceDB y libSQL y los comandos exactos están en
 [`BENCHMARKS.md`](BENCHMARKS.md). Si cambias el motor vectorial, vuelve a medir (en un directorio en
 disco real: `/tmp` suele ser `tmpfs`).
+
+### Análisis de texto
+
+`text.rs` analiza (al indexar y al consultar) con: `SimpleTokenizer` → minúsculas → **palabras vacías del
+español** → **palabras vacías del inglés** → plegado de acentos → stemmer español. Las listas de palabras
+vacías (feature `stopwords` de tantivy) van **antes** del plegado porque están escritas con acentos
+(«más», «está»). Los catálogos son bilingües, de ahí las dos listas.
+
+Por qué importa: en la fusión RRF una coincidencia de texto vale por su posición, no por su puntuación; si
+«de» o «the» casan, cualquier documento que los contenga obtiene un primer puesto de texto y puede
+desplazar a la coincidencia semántica correcta. Una consulta hecha solo de palabras vacías queda sin
+términos y no encuentra nada.
+
+**Versión del análisis.** `FTS_ANALYSIS_VERSION` (`index.rs`) va dentro del marcador `fts.generation`
+(8 bytes de generación + 4 de versión). Si cambia cómo se tokeniza (filtros, listas, stemmer), **sube la
+constante**: un índice de texto de otra versión no es válido y se reconstruye al abrir, aunque la
+generación coincida. Un marcador de 8 bytes (sin versión) también se descarta.
+
+### Fusión híbrida (`query_hybrid`, `rrf.rs`)
+
+- **Profundidad de candidatos.** Con texto y vector a la vez, cada fuente devuelve `max(k × 5, 50)`
+  resultados (`FUSION_DEPTH_FACTOR`, `FUSION_MIN_DEPTH`) antes de fusionar, y la fusión recorta a `k`. Con
+  listas de longitud `k`, un documento 2.º en una lista y 1.º en la otra no podía superar a los que solo
+  eran 1.º en una (con `k = 1`, empataban exactamente). Las consultas de una sola fuente no cambian.
+- **Orden determinista.** `rrf` ordena por puntuación (descendente), luego por el mejor puesto del
+  documento en cualquier lista, y al final por id. Antes ordenaba el contenido de un `HashMap`, así que los
+  empates (muy frecuentes: RRF solo mira posiciones) salían en orden distinto entre ejecuciones.
+- `textScore` y `vectorScore` de cada `Hit` salen de las listas profundas, no solo del top-`k`.
 
 ### Filtros escalares
 
@@ -271,6 +303,39 @@ Actualmente solo `ScalarFilter::Eq { field, value }`, sobre **cualquier campo**.
 3. Expón el parámetro en TS si aplica.
 
 ---
+
+### Embedder local (`hivedb-embed`)
+
+`LocalEmbedder` implementa el trait `Embedder` de `hivedb-index` con `multilingual-e5-small` sobre
+`candle` (Rust puro; el modelo se mapea con `mmap`). Prefijos `passage: ` / `query: ` según `EmbedKind`,
+media con máscara y normalización L2. Los textos de una llamada se procesan **ordenados por longitud**
+(lotes de 32, devolviendo el orden original) para no rellenar de más. Se verificó contra el modelo ONNX
+oficial (coseno 1,000000, diferencia máxima ~1e-7).
+
+**Descarga y caché** (`download.rs`). Los pesos (~470 MB) **no viajan en el paquete**: se descargan al
+activar el embedder, a `HIVEDB_MODEL_DIR` o a la caché del usuario, desde una revisión fija de Hugging Face
+(`HIVEDB_MODEL_BASE_URL` apunta a un espejo con la misma estructura). Cada archivo se verifica contra un
+SHA-256 y un tamaño fijados en el código; la caché solo se escribe por `rename`. La descarga:
+
+- tiene **tiempos máximos** (conexión 15 s, respuesta 30 s y un máximo para el cuerpo proporcional a lo
+  que falta, con un mínimo de 256 KiB/s);
+- **reintenta** hasta 4 veces con espera creciente (1, 2, 4 y 8 s) ante errores de red y respuestas 408,
+  429 y 5xx; un 404 u otro error del servidor no se reintenta;
+- **se reanuda** con `Range: bytes=N-` sobre `archivo.part`, re-hasheando lo ya descargado; si el servidor
+  ignora `Range` (200) empieza de cero, y un parcial corrupto se descarta y se reintenta una vez desde cero;
+- usa un **bloqueo** `archivo.lock` (`create_new`) para que dos procesos no descarguen a la vez; el segundo
+  espera y, si el primero termina, no vuelve a descargar. Un bloqueo sin tocar durante 2 min es de un proceso
+  muerto y se retoma.
+
+`ensure_multilingual_e5_small_with(&mut |&Progress| …)` informa de `{ file, file_index, file_count,
+downloaded, total }`; `ModelFiles::was_cached()` dice si no hubo que descargar. Con `HIVEDB_OFFLINE=1` nunca
+hay red. Tests: `download.rs` (servidor HTTP local: descarga, corte y reanudación, 500 con reintento, 404, SHA
+incorrecto, `Range` ignorado, parcial corrupto, bloqueo ajeno), `tests/local_model.rs` (modelo real, `#[ignore]`)
+y `tests/resume_real.rs` (reanudación contra Hugging Face de verdad a través de la redirección al CDN).
+
+**En napi/TS.** `prepare_embedder(on_progress)` (`#[napi]` libre) llama a `ensure_…_with` en
+`spawn_blocking` y envía el progreso por un `ThreadsafeFunction`; en TS es `HiveDB.prepareEmbedder({ onProgress })`
+→ `{ dir, spaceId, cached }`. Sin la feature `embedder-local` devuelve `EMBEDDER_UNAVAILABLE`.
 
 ## 8. Colecciones de documentos (`hivedb-core/src/collections.rs`)
 
@@ -379,6 +444,9 @@ El evaluador no tiene side effects; el llamador persiste las proposals como even
 - `subscribe` / `events` con `Predicate` (`Eq`, `Contains`, `Always`).
 - `toolStats(tool)`: métricas agregadas de `ToolCall` desde la proyección `ToolLedger`.
 - `lastSeq()`: último `seq` asignado.
+- `prepareEmbedder(onProgress?)` (función libre, no método): descarga y verifica el modelo del embedder local
+  con avance; ver «Embedder local». El `ThreadsafeFunction` recibe `(err, progreso)`; el wrapper TS lo adapta a
+  `onProgress(progreso)`.
 
 ### Construcción del `.node`
 
@@ -478,9 +546,17 @@ El binding nativo se construye, empaqueta y publica usando `@napi-rs/cli` 3.x. V
 ### CI (`.github/workflows/ci.yml`)
 
 - **Job `lint-and-test`** (ubuntu): `cargo fmt`, `cargo clippy`, `cargo test`.
-- **Job `build`** (matrix de 6 targets): compila cada binario con `napi build --platform --release --target <triple>`. Musl usa `-x` (cargo-zigbuild + Zig). El runner de macOS x64 se hace cross-compile desde `macos-latest` (ARM) — no se usa `macos-13` (Intel) porque GitHub lo está retirando.
+- **Job `build`** (matrix de 6 targets): compila cada binario con `napi build --platform --release --target <triple> --features embedder-local` (el embedder va en todos los paquetes publicados; el binario pasa de ~10 a ~13,7–16,8 MB según la plataforma). Musl usa `-x` (cargo-zigbuild + Zig). El runner de macOS x64 se hace cross-compile desde `macos-latest` (ARM) — no se usa `macos-13` (Intel) porque GitHub lo está retirando.
+- **Job `test-os`** (Windows y macOS): `cargo test -p hivedb-index`. El índice usa ficheros mapeados y rutas
+  específicas de cada sistema (en Windows no se puede borrar ni renombrar un fichero mapeado).
 - **Job `test-bun`** (ubuntu): descarga bindings linux-x64-gnu, compila TS, ejecuta `bun test`.
-- **Job `publish`** (solo en tag `v*`): `create-npm-dirs` → `download-artifact` → `napi artifacts` → `npm publish` por subpaquete → `tsc` → `npm publish` principal.
+- **Job `embedder-e2e`** (matriz de 5: linux x64 glibc, linux arm64, macOS arm64, Windows y linux x64 musl en
+  un contenedor `oven/bun:alpine`): descarga el binding de cada plataforma, **prepara el modelo real con
+  `HiveDB.prepareEmbedder`** (reintenta una vez; el modelo se cachea por plataforma) y ejecuta
+  `embedder_local.test.ts` con `HIVEDB_E2E_EMBEDDER=1`. En linux x64 además ejecuta los tests de Rust con el modelo
+  (`cargo test -p hivedb-embed -- --include-ignored`, incluida la reanudación real contra Hugging Face).
+  darwin-x64 no tiene runner Intel y solo se compila.
+- **Job `publish`** (solo en tag `v*`; necesita `lint-and-test`, `test-os`, `build`, `test-bun` y toda la matriz de `embedder-e2e`): `create-npm-dirs` → `download-artifact` → `napi artifacts` → `npm publish` por subpaquete → `tsc` → `npm publish` principal.
 
 ### `.cargo/config.toml` (musl)
 

@@ -19,5 +19,6 @@ tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-
 ureq = "3.4.2"
 
 [dev-dependencies]
+tempfile = "3"
 hivedb-core = { path = "../hivedb-core" }
 serde_json.workspace = true

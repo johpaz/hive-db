@@ -10,7 +10,7 @@ Cada afirmación tiene un estado:
 - ⚠ **Matizar.** Es cierta con una condición que hay que decir.
 - ✖ **Evitar.** Promete algo que el motor no hace hoy.
 
-Las cifras salen de [`BENCHMARKS.md`](BENCHMARKS.md) (100.000 frases reales de Wikipedia en español
+Las cifras salen de [`BENCHMARKS.md`](BENCHMARKS.md) (medidas con la 0.6.1) (100.000 frases reales de Wikipedia en español
 e inglés, embeddings `multilingual-e5-small`, una máquina de 16 hilos, disco NVMe). Si cambian allí,
 cambian aquí.
 
@@ -46,7 +46,7 @@ reactividad; a cambio ingiere más despacio y ocupa más disco (ver §3).
 | # | Afirmación habitual | Estado | Por qué | Redacción recomendada |
 |---|---|:---:|---|---|
 | 1 | «Es todo eso en una sola librería» | ✔ | Colecciones, log, búsqueda híbrida, memoria de trabajo, consentimiento y reactividad están en el mismo motor | «Una librería en lugar de tres o cuatro servicios» (con la tabla del §1 a mano) |
-| 2 | «Responde en ~1 ms con 100.000 documentos» | ⚠ | Vector: 1,4 ms (p50), 1,8 ms (p99). Texto: 2,5 ms. Híbrida: 4,3 ms (p99 9,5 ms) | «Entre 1 y 5 ms con 100.000 frases reales» |
+| 2 | «Responde en ~1 ms con 100.000 documentos» | ⚠ | Vector: 1,4 ms (p50), 1,8 ms (p99). Texto: 0,8 ms. Híbrida: 2,8 ms (p99 4,4 ms) | «Entre 1 y 3 ms con 100.000 frases reales» |
 | 3 | «Sin servidor, sin cuenta, sin API key» | ⚠ | Cierto para el motor. La búsqueda por significado necesita embeddings: el modelo local descarga ~470 MB una vez; un proveedor externo exige su clave | «Sin servidor ni cuenta. Para buscar por significado usa un modelo local (descarga única) o el proveedor que prefieras» |
 | 4 | «Funciona sin internet» | ⚠ | El motor sí. Activar el embedder local requiere una descarga la primera vez (se puede hacer de antemano) | «Funciona sin conexión; la primera vez que activas el modelo local lo descarga, o puedes llevarlo ya descargado» |
 | 5 | «Cada cosa queda registrada y no se borra» | ⚠ | Cierto para el log. Pero lo inmutable choca con el **derecho de supresión** (RGPD) | «El historial es inmutable: no guardes datos personales en él; guarda referencias» |
@@ -56,11 +56,12 @@ reactividad; a cambio ingiere más despacio y ocupa más disco (ver §3).
 | 9 | «Ideal para hospitales, bancos y entidades públicas» | ✖ | No hay cifrado en reposo ni control de acceso propio; el log no se puede purgar; no hay certificaciones | «Tus datos no salen de tu máquina. El cifrado, el acceso y la política de borrado dependen de tu despliegue» |
 | 10 | «Ninguna otra base te da esto» | ✖ | Otros dan partes (EventStoreDB, el grafo temporal de Zep, los *checkpoints* de LangGraph) | «Pocas combinan en un solo motor log causal, consentimiento y búsqueda híbrida» |
 | 11 | «Memoria de trabajo que expira sola» | ⚠ | Cierto, pero vive en la RAM del proceso: se pierde al cerrar y no se comparte | «Memoria de trabajo con caducidad, en memoria del proceso» |
-| 12 | «sqlite-vec ingiere más rápido» | ✔ | 88.000 frente a 4.900 documentos/s, por lo que HiveDB hace además (texto, log, grafo) | Decirlo con la cifra y la razón |
+| 12 | «sqlite-vec ingiere más rápido» | ✔ | 88.000 frente a 5.200 documentos/s, por lo que HiveDB hace además (texto, log, grafo) | Decirlo con la cifra y la razón |
 | 13 | «Más rápida que LanceDB» | ⚠ | Solo a igual recall y con los parámetros de búsqueda ajustados en LanceDB | «A igual precisión, 1,4 ms frente a ~3 ms de LanceDB ajustado (100.000 frases reales)» |
 | 14 | «Todavía no tiene benchmarks con datos reales» | ✖ (obsoleta) | Ya los hay: 100.000 frases reales, con comparadores | «Medido con 100.000 frases reales; no se ha probado con millones» |
 | 15 | «Es un proyecto joven, sin versión 1.0» | ✔ | Versión 0.x; la API puede cambiar | Mantenerlo |
 | 16 | «Tus datos no salen de tu máquina» | ⚠ | Cierto con el modelo local. Con embeddings de una API, el texto va a ese proveedor | «Con el modelo local, el texto no sale de tu máquina» |
+| 17 | «Viene con el modelo de embeddings incluido» | ✖ | El paquete trae el **embedder** (el código, +~7 MB por binario), no los pesos del modelo (~470 MB), que se descargan la primera vez | «Incluye un embedder local; el modelo se descarga una vez, con progreso, reintentos y reanudación, o puedes llevarlo ya descargado» |
 
 ---
 
@@ -73,10 +74,10 @@ máquina de 16 hilos con disco NVMe**.
 |---|---|---|
 | Búsqueda vectorial (p50 / p99) | 1,4 / 1,8 ms con recall 0,982 | LanceDB ajustado: ~3 ms con recall 0,965 · libSQL (`float8`): 10 ms con recall 0,975 |
 | Con recall 0,994 | 2,5 / 3,5 ms | LanceDB: ~10 ms para 0,9998 |
-| Búsqueda de texto / híbrida (p50) | 2,5 ms / 4,3 ms | — |
-| Apertura de una base poblada | 46 ms | sqlite-vec 75 ms · LanceDB 89–212 ms |
-| Ingesta por lotes | ~4.900 docs/s | sqlite-vec 88.000 · LanceDB 9.500–65.000 · libSQL 79–524 |
-| Disco | 242,5 MiB | sqlite-vec 149 MiB · LanceDB 147–203 MiB · libSQL (`float8`) 2.758 MiB |
+| Búsqueda de texto / híbrida (p50) | 0,8 ms / 2,8 ms | — |
+| Apertura de una base poblada | 40 ms | sqlite-vec 75 ms · LanceDB 89–212 ms |
+| Ingesta por lotes | ~5.200 docs/s | sqlite-vec 88.000 · LanceDB 9.500–65.000 · libSQL 79–524 |
+| Disco | 241,2 MiB | sqlite-vec 149 MiB · LanceDB 147–203 MiB · libSQL (`float8`) 2.758 MiB |
 | Memoria anónima del motor (tras reabrir y consultar) | ~31 MiB (+148 MiB de vectores mapeados desde disco) | — |
 
 Lo que **no** se ha medido y por tanto no se afirma: más de 100.000 documentos, varias máquinas,
@@ -91,7 +92,7 @@ Esta sección genera confianza; conviene mantenerla y ampliarla:
 
 - **Necesitas SQL, reportes o una aplicación tradicional** (facturación, inventario): usa Postgres o
   SQLite. HiveDB va al lado, no los reemplaza.
-- **Cargas millones de documentos de golpe:** sqlite-vec ingiere unas 18 veces más rápido, y lo probado
+- **Cargas millones de documentos de golpe:** sqlite-vec ingiere unas 17 veces más rápido, y lo probado
   llega a 100.000.
 - **Quieres que un servicio «extraiga recuerdos» con un LLM:** eso lo hacen Mem0 o Zep. HiveDB es el
   almacén que podrías usar debajo.
@@ -117,7 +118,7 @@ Esta sección genera confianza; conviene mantenerla y ampliarla:
 >
 > - **Memoria de trabajo** con caducidad, en la memoria de tu proceso.
 > - **Memoria de largo plazo** que busca por significado y por palabras exactas a la vez. Con 100.000
->   frases reales responde en 1–5 ms.
+>   frases reales responde en 1–3 ms.
 > - **Historial inmutable** de lo que el agente aprende y hace, con la relación entre causas y efectos.
 > - **Colecciones de documentos** para el estado que cambia (sesiones, mensajes, configuración).
 >
@@ -140,7 +141,7 @@ Esta sección genera confianza; conviene mantenerla y ampliarla:
 >
 > - Si necesitas SQL, reportes o una aplicación tradicional, usa Postgres o SQLite; HiveDB va al lado.
 > - Si cargas millones de documentos de golpe, sqlite-vec ingiere mucho más rápido (88.000 frente a
->   4.900 documentos por segundo): HiveDB indexa además el texto y guarda el historial.
+>   5.200 documentos por segundo): HiveDB indexa además el texto y guarda el historial.
 > - Si quieres que un servicio extraiga recuerdos con un LLM, eso lo hacen Mem0 o Zep; HiveDB es el
 >   almacén que podrías usar debajo.
 > - Si necesitas varios procesos o máquinas sobre la misma base, cifrado en reposo o borrado

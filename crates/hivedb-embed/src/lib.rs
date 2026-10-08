@@ -19,7 +19,10 @@ use hivedb_index::{EmbedKind, Embedder, IndexError};
 use std::path::Path;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-pub use download::{ModelFiles, default_cache_dir, ensure_multilingual_e5_small};
+pub use download::{
+    ModelFiles, Progress, default_cache_dir, ensure_multilingual_e5_small,
+    ensure_multilingual_e5_small_with,
+};
 
 /// Textos por pasada del modelo. Acota la memoria de activaciones.
 const BATCH_SIZE: usize = 32;
@@ -56,6 +59,15 @@ impl LocalEmbedder {
     /// La caché se puede mover con `HIVEDB_MODEL_DIR`.
     pub fn multilingual_e5_small() -> hivedb_index::Result<Self> {
         let files = ensure_multilingual_e5_small()?;
+        Self::from_dir(files.dir(), files.space_id())
+    }
+
+    /// Como [`LocalEmbedder::multilingual_e5_small`], avisando del avance de la descarga
+    /// (solo hay avance la primera vez, cuando el modelo no está en la caché).
+    pub fn multilingual_e5_small_with(
+        on_progress: &mut dyn FnMut(&Progress),
+    ) -> hivedb_index::Result<Self> {
+        let files = ensure_multilingual_e5_small_with(on_progress)?;
         Self::from_dir(files.dir(), files.space_id())
     }
 

@@ -1,7 +1,7 @@
 //! Índice vectorial derivado: ids de documento sobre el grafo plano de
 //! [`crate::flat_hnsw`], con borrados por tombstone y volcado a disco.
 
-use crate::flat_hnsw::Graph;
+use crate::flat_hnsw::{Collect, Graph, NoTrace, Recorder};
 use crate::vector_file::View;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -69,6 +69,25 @@ impl Inner {
             None => false,
         }
     }
+}
+
+/// Un paso de la búsqueda HNSW: `node` entró al frente de búsqueda de `layer`
+/// alcanzado desde `from` (`None` para el punto de entrada).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceStep {
+    pub layer: u8,
+    pub from: Option<String>,
+    pub node: String,
+    /// Distancia coseno (1 − similitud) de `node` a la consulta.
+    pub distance: f32,
+}
+
+/// Resultado de [`VectorIndex::search_traced`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorTrace {
+    /// `(id, posición, similitud)`, igual que `search`.
+    pub hits: Vec<(String, usize, f32)>,
+    pub steps: Vec<TraceStep>,
 }
 
 /// Índice ANN derivado con upsert/delete mediante tombstones en memoria.
@@ -161,6 +180,42 @@ impl VectorIndex {
         k: usize,
         ef_search: Option<usize>,
     ) -> crate::Result<Vec<(String, usize, f32)>> {
+        self.search_with(vector, k, ef_search, &mut NoTrace)
+    }
+
+    /// Igual que [`search`](Self::search) pero devuelve además la ruta que
+    /// recorrió el grafo (de la capa superior a la 0). Es una herramienta de
+    /// diagnóstico: la ruta normal de búsqueda no registra nada.
+    pub fn search_traced(
+        &self,
+        vector: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> crate::Result<VectorTrace> {
+        let mut collect = Collect::default();
+        let hits = self.search_with(vector, k, ef_search, &mut collect)?;
+        let inner = self.inner.read().unwrap();
+        let name = |node: u32| inner.ids.get(node as usize).cloned().unwrap_or_default();
+        let steps = collect
+            .0
+            .into_iter()
+            .map(|(layer, from, node, distance)| TraceStep {
+                layer: layer as u8,
+                from: (from != u32::MAX).then(|| name(from)),
+                node: name(node),
+                distance,
+            })
+            .collect();
+        Ok(VectorTrace { hits, steps })
+    }
+
+    fn search_with<R: Recorder>(
+        &self,
+        vector: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+        rec: &mut R,
+    ) -> crate::Result<Vec<(String, usize, f32)>> {
         validate_vector(vector, self.dimension)?;
         if k == 0 {
             return Err(crate::IndexError::InvalidVector(
@@ -174,7 +229,7 @@ impl VectorIndex {
             .max(k.saturating_add(inner.deleted.len()))
             .max(1);
         let ef = want.max(ef_search.unwrap_or(DEFAULT_EF_SEARCH));
-        let neighbors = inner.graph.search(vector, ef, want);
+        let neighbors = inner.graph.search_rec(vector, ef, want, rec);
 
         let mut results = Vec::with_capacity(k);
         for (internal_id, distance) in neighbors {

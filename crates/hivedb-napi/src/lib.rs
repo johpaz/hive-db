@@ -93,6 +93,20 @@ pub struct JsHit {
 }
 
 #[napi(object)]
+pub struct JsTraceStep {
+    pub layer: u32,
+    pub from: Option<String>,
+    pub node: String,
+    pub distance: f64,
+}
+
+#[napi(object)]
+pub struct JsVectorTrace {
+    pub hits: Vec<JsHit>,
+    pub steps: Vec<JsTraceStep>,
+}
+
+#[napi(object)]
 pub struct JsIndexDoc {
     pub id: String,
     pub name: Option<String>,
@@ -184,6 +198,75 @@ async fn load_local_embedder() -> Result<Arc<dyn hivedb_core::Embedder>> {
 
 #[cfg(not(feature = "embedder-local"))]
 async fn load_local_embedder() -> Result<Arc<dyn hivedb_core::Embedder>> {
+    Err(Error::from_reason(
+        "EMBEDDER_UNAVAILABLE: this build was compiled without the local embedder \
+         (feature `embedder-local`)",
+    ))
+}
+
+/// Avance de la descarga del modelo del embedder local.
+#[napi(object)]
+pub struct JsModelProgress {
+    /// Archivo en descarga (`model.safetensors`…).
+    pub file: String,
+    /// Posición de este archivo entre los que faltan (desde 1).
+    pub file_index: u32,
+    pub file_count: u32,
+    /// Bytes ya descargados de este archivo (incluye lo reanudado).
+    pub downloaded: f64,
+    pub total: f64,
+}
+
+/// Modelo del embedder local ya presente y verificado en la caché.
+#[napi(object)]
+pub struct JsPreparedModel {
+    /// Directorio con los archivos del modelo.
+    pub dir: String,
+    /// Identidad del espacio vectorial (modelo y revisión).
+    pub space_id: String,
+    /// `true` si ya estaba todo en la caché y no se descargó nada.
+    pub cached: bool,
+}
+
+/// Descarga (si falta) y verifica el modelo del embedder local, avisando del avance, sin abrir
+/// ninguna base. Permite mostrar una barra de progreso antes de `open({ embedder: "local" })`.
+#[cfg(feature = "embedder-local")]
+#[napi]
+pub async fn prepare_embedder(
+    on_progress: Option<ThreadsafeFunction<JsModelProgress>>,
+) -> Result<JsPreparedModel> {
+    tokio::task::spawn_blocking(move || {
+        let mut report = |progress: &hivedb_embed::Progress| {
+            if let Some(callback) = on_progress.as_ref() {
+                callback.call(
+                    Ok(JsModelProgress {
+                        file: progress.file.clone(),
+                        file_index: progress.file_index as u32,
+                        file_count: progress.file_count as u32,
+                        downloaded: progress.downloaded as f64,
+                        total: progress.total as f64,
+                    }),
+                    ThreadsafeFunctionCallMode::NonBlocking,
+                );
+            }
+        };
+        hivedb_embed::ensure_multilingual_e5_small_with(&mut report)
+    })
+    .await
+    .map_err(js_err)?
+    .map(|files| JsPreparedModel {
+        dir: files.dir().display().to_string(),
+        space_id: files.space_id().to_string(),
+        cached: files.was_cached(),
+    })
+    .map_err(js_err)
+}
+
+#[cfg(not(feature = "embedder-local"))]
+#[napi]
+pub async fn prepare_embedder(
+    _on_progress: Option<ThreadsafeFunction<JsModelProgress>>,
+) -> Result<JsPreparedModel> {
     Err(Error::from_reason(
         "EMBEDDER_UNAVAILABLE: this build was compiled without the local embedder \
          (feature `embedder-local`)",
@@ -895,6 +978,44 @@ impl JsHiveDB {
         self.with_db(|db| {
             let hits = db.query_hybrid(query).map_err(js_err)?;
             Ok(hits.into_iter().map(hit_to_js).collect())
+        })
+    }
+
+    /// Búsqueda vectorial sin filtros con la ruta del HNSW (capas y nodos visitados).
+    #[napi(js_name = "traceVector")]
+    pub async fn trace_vector(
+        &self,
+        vector: Float32Array,
+        k: u32,
+        ef_search: Option<u32>,
+    ) -> Result<JsVectorTrace> {
+        let vector = vector.to_vec();
+        self.with_db(|db| {
+            let trace = db
+                .trace_vector_search(&vector, k as usize, ef_search.map(|e| e as usize))
+                .map_err(js_err)?;
+            Ok(JsVectorTrace {
+                hits: trace
+                    .hits
+                    .into_iter()
+                    .map(|(id, _, score)| JsHit {
+                        id,
+                        score: score as f64,
+                        text_score: None,
+                        vector_score: Some(score as f64),
+                    })
+                    .collect(),
+                steps: trace
+                    .steps
+                    .into_iter()
+                    .map(|s| JsTraceStep {
+                        layer: s.layer as u32,
+                        from: s.from,
+                        node: s.node,
+                        distance: s.distance as f64,
+                    })
+                    .collect(),
+            })
         })
     }
 

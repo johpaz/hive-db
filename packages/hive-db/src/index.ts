@@ -1,10 +1,13 @@
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { JsHiveDb } = require("../native.cjs") as {
+const { JsHiveDb, prepareEmbedder: nativePrepareEmbedder } = require("../native.cjs") as {
   JsHiveDb: {
     open(path: string, options?: JsOpenOptions): Promise<JsHiveDbInner>;
   };
+  prepareEmbedder(
+    onProgress?: (error: Error | null, progress: ModelProgress) => void
+  ): Promise<PreparedEmbedder>;
 };
 
 export type HiveDBErrorCode =
@@ -65,6 +68,7 @@ interface JsHiveDbInner {
   colFindBy(collection: string, field: string, valueJson: string, options?: JsScanOptions): Promise<JsDocEntry[]>;
   colBatch(ops: JsColOp[]): Promise<void>;
   queryHybrid(query: JsHybridQuery): Promise<JsHit[]>;
+  traceVector(vector: Float32Array, k: number, efSearch?: number): Promise<VectorTrace>;
   causalThread(streamId: string, agents?: string[]): Promise<string>;
   buildAgentContext(reqJson: string): Promise<string>;
   evaluateHarness(inputJson: string): Promise<string>;
@@ -270,6 +274,33 @@ export interface ScalarFilter {
   value: string;
 }
 
+/** Avance de la descarga del modelo del embedder local. */
+export interface ModelProgress {
+  /** Archivo en descarga (`model.safetensors`…). */
+  file: string;
+  /** Posición de este archivo entre los que faltan (desde 1). */
+  fileIndex: number;
+  fileCount: number;
+  /** Bytes ya descargados de este archivo (incluye lo reanudado). */
+  downloaded: number;
+  total: number;
+}
+
+/** Modelo del embedder local, presente y verificado en la caché. */
+export interface PreparedEmbedder {
+  /** Directorio con los archivos del modelo. */
+  dir: string;
+  /** Identidad del espacio vectorial (modelo y revisión). */
+  spaceId: string;
+  /** `true` si ya estaba todo en la caché y no se descargó nada. */
+  cached: boolean;
+}
+
+export interface PrepareEmbedderOptions {
+  /** Se llama durante la descarga (puede ser decenas de veces por segundo). */
+  onProgress?: (progress: ModelProgress) => void;
+}
+
 export interface OpenOptions {
   /** Omitir para usar BM25 en modo solo texto. */
   vector?: VectorOptions;
@@ -320,6 +351,22 @@ export interface FieldBoosts {
   name?: number;
   body?: number;
   tags?: number;
+}
+
+/** Un paso de la búsqueda HNSW: `node` entró al frente de `layer` desde `from`. */
+export interface TraceStep {
+  layer: number;
+  /** `undefined` para el punto de entrada. */
+  from?: string;
+  node: string;
+  /** Distancia coseno (1 − similitud). */
+  distance: number;
+}
+
+export interface VectorTrace {
+  hits: Hit[];
+  /** Ruta del grafo, de la capa más alta a la 0 (acotada a 1024 pasos). */
+  steps: TraceStep[];
 }
 
 export interface HybridQuery {
@@ -497,6 +544,25 @@ export class HiveDB {
    * Open (or create) a database at `path`. Pass `":memory:"` for an
    * ephemeral database that never touches persistent storage.
    */
+  /**
+   * Descarga (si falta) y verifica el modelo del embedder local, sin abrir ninguna base.
+   * Úsalo antes de `HiveDB.open(path, { embedder: "local" })` para mostrar el progreso de la
+   * primera descarga (~470 MB) en lugar de que la apertura tarde minutos sin avisar.
+   * La descarga se reanuda si se corta. Con `HIVEDB_OFFLINE=1` nunca accede a la red y falla con
+   * `EMBEDDER_UNAVAILABLE` si el modelo no está. `HIVEDB_MODEL_DIR` cambia la caché y
+   * `HIVEDB_MODEL_BASE_URL` apunta a un espejo.
+   */
+  static async prepareEmbedder(options: PrepareEmbedderOptions = {}): Promise<PreparedEmbedder> {
+    const { onProgress } = options;
+    try {
+      return await nativePrepareEmbedder(
+        onProgress ? (error, progress) => (error ? undefined : onProgress(progress)) : undefined
+      );
+    } catch (error) {
+      rethrowSemanticError(error);
+    }
+  }
+
   static async open(path: string, options?: OpenOptions): Promise<HiveDB> {
     try {
       return new HiveDB(await JsHiveDb.open(path, options));
@@ -668,6 +734,18 @@ export class HiveDB {
   async queryHybrid(query: HybridQuery): Promise<Hit[]> {
     try {
       return await this.inner.queryHybrid(query);
+    } catch (error) {
+      rethrowSemanticError(error);
+    }
+  }
+
+  /**
+   * Búsqueda vectorial sin filtros que devuelve además la ruta del HNSW.
+   * Herramienta de diagnóstico: `queryHybrid` no registra nada.
+   */
+  async traceVector(vector: Float32Array, k: number, efSearch?: number): Promise<VectorTrace> {
+    try {
+      return await this.inner.traceVector(vector, k, efSearch);
     } catch (error) {
       rethrowSemanticError(error);
     }

@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Índices semánticos de HiveDB: BM25 (tantivy), ANN (HNSW propio) y fusión RRF."
 
 [dependencies]
-tantivy = { version = "0.22", default-features = false, features = ["mmap"] }
+tantivy = { version = "0.22", default-features = false, features = ["mmap", "stopwords"] }
 rayon = "1"
 memmap2 = "0.9"
 bytemuck = "1"

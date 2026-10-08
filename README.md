@@ -59,7 +59,7 @@ La metodología, las curvas y los comandos para reproducirlo están en
 
 | | Vector p50 | recall@10 | Arranque en frío | Disco | Búsqueda híbrida |
 |---|---:|---:|---:|---:|:---:|
-| **HiveDB** (HNSW, `ef`=200) | **1,4 ms** | 0,982 | **46 ms** | 242,5 MiB | Sí (4,3 ms p50) |
+| **HiveDB** (HNSW, `ef`=200) | **1,4 ms** | 0,982 | **40 ms** | 241,2 MiB | Sí (2,8 ms p50) |
 | sqlite-vec (exacto) | 71,1 ms | 0,9999 | 75 ms | 149,4 MiB | No |
 | LanceDB (exacto) | 162,6 ms | 0,9999 | 212 ms | 146,7 MiB | No |
 | LanceDB (IVF_HNSW_SQ, ajustado: `nprobes`=20, `ef`=400) | 3,1 ms | 0,965 | 89 ms | 203,0 MiB | No |
@@ -67,7 +67,7 @@ La metodología, las curvas y los comandos para reproducirlo están en
 
 A igual recall, la búsqueda vectorial de HiveDB es más rápida que la de LanceDB ajustado y que la de
 libSQL, y su memoria anónima es de ~31 MiB (los vectores van mapeados desde disco). Honestidad por
-delante: HiveDB **ingiere más despacio (~4,9k documentos/s frente a 9,5k–88k) y ocupa ~1,6× el disco de
+delante: HiveDB **ingiere más despacio (~5,2k documentos/s frente a 9,5k–88k) y ocupa ~1,6× el disco de
 sqlite-vec**, porque además indexa texto, mantiene el log y construye el grafo al insertar; y con el
 `ef` por defecto el recall es 0,982 (0,994 con `efSearch` = 400). Datos reales pero de una máquina y
 100.000 documentos: no se ha probado con millones.
@@ -97,12 +97,17 @@ Trae binarios precompilados para Linux x64 (glibc y musl), Linux arm64, macOS x6
 Windows x64: no necesitas Rust instalado. La guía de uso, con ejemplos de cada API, está en
 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
 
-> **Embedder local.** `embedder: "local"` necesita un binario compilado con la feature
-> `embedder-local` (+6 MB). El modelo (~470 MB) no viaja con el paquete: se descarga la primera vez
-> que lo activas, la única conexión de red del motor; con `HIVEDB_OFFLINE=1` nunca la hace y se puede preparar de antemano para máquinas
-> sin red. Los paquetes publicados todavía no incluyen la feature; mientras tanto puedes aportar
-> tus propios vectores, de un modelo local o de una API (`vector: { dimension, spaceId }`), o compilar
-> el binding con `--features embedder-local`. Ver la sección 5 de la guía.
+> **Embedder local.** Los binarios publicados ya incluyen el embedder (el código; en total 13,7–16,8 MB
+> por plataforma), así que `embedder: "local"` funciona sin compilar nada. Los **pesos del modelo
+> (~470 MB) no viajan en el paquete**: se descargan la primera vez que lo activas —la única conexión
+> de red del motor— con tiempos máximos, reintentos y reanudación. Para no esperar en silencio, llama
+> antes a `HiveDB.prepareEmbedder({ onProgress })`; con `HIVEDB_OFFLINE=1` nunca accede a la red y se puede
+> llevar el modelo de antemano a máquinas sin red. Detalle en la [guía](docs/USER_GUIDE.md) (§5).
+
+```ts
+await HiveDB.prepareEmbedder({ onProgress: (p) => console.log(p.file, p.downloaded, "/", p.total) });
+const db = await HiveDB.open("./data", { embedder: "local" });
+```
 
 ## Arquitectura
 
@@ -145,13 +150,13 @@ la migración están en [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
 
 ## Estado del proyecto
 
-Versión **0.5.x**, antes de la 1.0: la API puede cambiar entre versiones menores, y el formato en
+Versión **0.6.x**, antes de la 1.0: la API puede cambiar entre versiones menores, y el formato en
 disco se migra solo al abrir (una base ya migrada no se puede abrir con una versión anterior; ver
 la guía). El motor tiene tests de propiedades, de concurrencia con `loom` y de recuperación tras
 fallos a medias. El historial de hitos está en [`docs/GATES.md`](docs/GATES.md).
 
-Pendiente antes de la 1.0: benchmarks con embeddings reales, incluir el embedder local en los
-paquetes publicados y estabilizar el formato de eventos en disco.
+Pendiente antes de la 1.0: probar con más de 100.000 documentos y en más máquinas, usar el embedder
+desde funciones de JS (APIs y servidores locales como Ollama) y estabilizar el formato de eventos en disco.
 
 ## Documentación
 

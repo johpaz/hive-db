@@ -13,6 +13,29 @@ bun add @johpaz/hive-db
 
 Incluye binarios precompilados para Linux x64 (glibc y musl), Linux arm64, macOS x64/arm64 y Windows x64 — no necesitas Rust instalado.
 
+### Embeddings sin configurar nada (opcional)
+
+Los binarios incluyen un embedder local (`multilingual-e5-small`, español e inglés, en CPU): con
+`embedder: "local"` HiveDB genera los vectores a partir del texto. Los pesos del modelo (~470 MB) **no**
+vienen en el paquete: se descargan la primera vez que lo activas, con reintentos y reanudación. Para
+mostrar el avance en lugar de esperar en silencio:
+
+```ts
+import { HiveDB } from "@johpaz/hive-db";
+
+await HiveDB.prepareEmbedder({
+  onProgress: ({ file, downloaded, total }) => console.log(file, Math.floor((100 * downloaded) / total) + "%"),
+});
+const db = await HiveDB.open("./data", { embedder: "local" });
+await db.upsertDoc({ id: "a", body: "Cómo configurar tu cuenta de email" });
+await db.queryHybrid({ text: "correo electrónico", k: 3 }); // encuentra "a" aunque no comparta palabras
+```
+
+`HIVEDB_OFFLINE=1` impide cualquier acceso a la red; `HIVEDB_MODEL_DIR` cambia dónde se guarda el modelo y
+`HIVEDB_MODEL_BASE_URL` apunta a un espejo. También puedes aportar tus propios vectores (de cualquier modelo
+o API) con `vector: { dimension, spaceId }`. Ver la
+[guía de uso](https://github.com/johpaz/hive-db/blob/main/docs/USER_GUIDE.md).
+
 ## Uso rápido
 
 ```ts
@@ -48,7 +71,8 @@ db.close();
 | Capa | Motor |
 |---|---|
 | Event log append-only + proyecciones | `redb` |
-| Búsqueda de texto (BM25, stemming español) | `tantivy` |
+| Búsqueda de texto (BM25, stemming español, sin palabras vacías en es/en) | `tantivy` |
+| Embeddings locales (opcional) | `candle` |
 | Búsqueda vectorial (ANN) | HNSW propio |
 | Fusión de resultados híbridos | Reciprocal Rank Fusion propio |
 | Colecciones de documentos (CRUD mutable) | `redb` |
@@ -58,8 +82,8 @@ db.close();
 ## Rendimiento
 
 Con 100.000 frases reales (384 dimensiones, disco NVMe): búsqueda vectorial ~1,4 ms (p50) con
-recall@10 ≈ 0,98, búsqueda híbrida ~4,3 ms, apertura de una base poblada ~46 ms, inserción por lotes
-~4.900 documentos/s, 243 MiB en disco y ~31 MiB de memoria anónima. Cada consulta puede ajustar
+recall@10 ≈ 0,98, búsqueda híbrida ~2,8 ms, apertura de una base poblada ~40 ms, inserción por lotes
+~5.200 documentos/s, 241 MiB en disco y ~31 MiB de memoria anónima. Cada consulta puede ajustar
 precisión y velocidad con `efSearch` (por defecto 200). Metodología, comparación con sqlite-vec,
 LanceDB y libSQL y comandos para reproducirlo: [`docs/BENCHMARKS.md`](https://github.com/johpaz/hive-db/blob/main/docs/BENCHMARKS.md).
 Historial de cambios: [`CHANGELOG.md`](https://github.com/johpaz/hive-db/blob/main/CHANGELOG.md).

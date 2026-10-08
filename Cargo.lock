@@ -995,6 +995,7 @@ dependencies = [
  "hivedb-index",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokenizers 0.23.2",
  "ureq",
 ]

@@ -108,6 +108,35 @@ struct Upper {
     len: Vec<u8>,
 }
 
+/// Observador de la búsqueda. `NoTrace` es un no-op que desaparece al
+/// monomorfizar, así que la ruta normal no paga nada por la traza.
+pub(crate) trait Recorder {
+    /// `node` entró al frente de búsqueda de `layer`, alcanzado desde `from`
+    /// (`NO_NODE` para el punto de entrada).
+    fn step(&mut self, layer: usize, from: u32, node: u32, distance: f32);
+}
+
+pub(crate) struct NoTrace;
+
+impl Recorder for NoTrace {
+    #[inline(always)]
+    fn step(&mut self, _: usize, _: u32, _: u32, _: f32) {}
+}
+
+/// Pasos máximos que guarda una traza (acota memoria con `ef` muy altos).
+pub(crate) const MAX_TRACE_STEPS: usize = 1024;
+
+#[derive(Default)]
+pub(crate) struct Collect(pub(crate) Vec<(usize, u32, u32, f32)>);
+
+impl Recorder for Collect {
+    fn step(&mut self, layer: usize, from: u32, node: u32, distance: f32) {
+        if self.0.len() < MAX_TRACE_STEPS {
+            self.0.push((layer, from, node, distance));
+        }
+    }
+}
+
 pub(crate) struct Graph {
     dim: usize,
     /// Vecinos máximos en capas superiores; la capa 0 admite `2 * m`.
@@ -236,12 +265,23 @@ impl Graph {
         }
     }
 
-    fn greedy(&self, query: &[f32], mut best: (f32, u32), layer: usize) -> (f32, u32) {
+    fn greedy(&self, query: &[f32], best: (f32, u32), layer: usize) -> (f32, u32) {
+        self.greedy_rec(query, best, layer, &mut NoTrace)
+    }
+
+    fn greedy_rec<R: Recorder>(
+        &self,
+        query: &[f32],
+        mut best: (f32, u32),
+        layer: usize,
+        rec: &mut R,
+    ) -> (f32, u32) {
         loop {
             let mut improved = false;
             for &neighbor in self.neighbors(layer, best.1) {
                 let d = dist(query, self.view.get(neighbor));
                 if d < best.0 {
+                    rec.step(layer, best.1, neighbor, d);
                     best = (d, neighbor);
                     improved = true;
                 }
@@ -260,11 +300,23 @@ impl Graph {
         ef: usize,
         layer: usize,
     ) -> Vec<(f32, u32)> {
+        self.search_layer_rec(query, entries, ef, layer, &mut NoTrace)
+    }
+
+    fn search_layer_rec<R: Recorder>(
+        &self,
+        query: &[f32],
+        entries: &[(f32, u32)],
+        ef: usize,
+        layer: usize,
+        rec: &mut R,
+    ) -> Vec<(f32, u32)> {
         let mut visited = Visited::new(self.len());
         let mut candidates: BinaryHeap<Reverse<(Dist, u32)>> = BinaryHeap::new();
         let mut results: BinaryHeap<(Dist, u32)> = BinaryHeap::new();
         for &(d, node) in entries {
             if visited.insert(node) {
+                rec.step(layer, NO_NODE, node, d);
                 candidates.push(Reverse((Dist::new(d), node)));
                 results.push((Dist::new(d), node));
                 if results.len() > ef {
@@ -282,6 +334,7 @@ impl Graph {
                 }
                 let dn = Dist::new(dist(query, self.view.get(neighbor)));
                 if results.len() < ef || results.peek().is_some_and(|worst| dn < worst.0) {
+                    rec.step(layer, current, neighbor, dn.get());
                     candidates.push(Reverse((dn, neighbor)));
                     results.push((dn, neighbor));
                     if results.len() > ef {
@@ -433,7 +486,18 @@ impl Graph {
 
     /// Los `limit` vecinos más cercanos de `query` (se normaliza aquí), de
     /// menor a mayor distancia: `(id, distancia coseno)`.
+    #[cfg(test)]
     pub(crate) fn search(&self, query: &[f32], ef: usize, limit: usize) -> Vec<(u32, f32)> {
+        self.search_rec(query, ef, limit, &mut NoTrace)
+    }
+
+    pub(crate) fn search_rec<R: Recorder>(
+        &self,
+        query: &[f32],
+        ef: usize,
+        limit: usize,
+        rec: &mut R,
+    ) -> Vec<(u32, f32)> {
         if self.entry == NO_NODE || limit == 0 {
             return Vec::new();
         }
@@ -444,10 +508,11 @@ impl Graph {
             query.to_vec()
         };
         let mut entry = (dist(&query, self.view.get(self.entry)), self.entry);
+        rec.step(self.max_level, NO_NODE, entry.1, entry.0);
         for layer in (1..=self.max_level).rev() {
-            entry = self.greedy(&query, entry, layer);
+            entry = self.greedy_rec(&query, entry, layer, rec);
         }
-        let mut found = self.search_layer(&query, &[entry], ef.max(limit), 0);
+        let mut found = self.search_layer_rec(&query, &[entry], ef.max(limit), 0, rec);
         found.truncate(limit);
         found.into_iter().map(|(d, node)| (node, d)).collect()
     }
@@ -697,6 +762,28 @@ mod tests {
             hits += found.iter().filter(|(id, _)| truth.contains(id)).count();
         }
         hits as f64 / (queries.len() * 10) as f64
+    }
+
+    #[test]
+    fn la_traza_no_cambia_el_resultado_y_describe_la_ruta() {
+        let dir = tempfile::tempdir().unwrap();
+        let vectors = rng_vectors(1_500, 12, 3);
+        let (graph, _file) = build(dir.path(), &vectors);
+        for query in rng_vectors(20, 12, 5) {
+            let plain = graph.search(&query, 120, 10);
+            let mut collect = Collect::default();
+            let traced = graph.search_rec(&query, 120, 10, &mut collect);
+            assert_eq!(plain, traced);
+            let steps = collect.0;
+            assert!(!steps.is_empty());
+            // El primer paso es el punto de entrada, en la capa más alta.
+            assert_eq!((steps[0].0, steps[0].1), (graph.max_level, NO_NODE));
+            // Las capas nunca suben, y la capa 0 contiene todos los resultados.
+            assert!(steps.windows(2).all(|w| w[1].0 <= w[0].0));
+            for (node, _) in &traced {
+                assert!(steps.iter().any(|s| s.0 == 0 && s.2 == *node));
+            }
+        }
     }
 
     #[test]

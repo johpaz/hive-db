@@ -221,22 +221,50 @@ jobs:
         working-directory: packages/hive-db
         run: bun test
 
-  # Comprueba con el modelo real que el embedder incluido en el binario publicado
-  # funciona de punta a punta (coincide con la referencia ONNX y encuentra por
-  # significado desde Bun). Descarga el modelo (~470 MB) una vez y lo cachea.
+  # Comprueba con el modelo real que el embedder incluido en el binario de CADA plataforma
+  # funciona de punta a punta: descarga el modelo con `prepareEmbedder` (probando la descarga
+  # real, con reanudación y avance) y encuentra por significado desde Bun. El modelo (~470 MB)
+  # se cachea por plataforma. darwin-x64 no tiene runner Intel: solo se compila.
   embedder-e2e:
-    name: Embedder local (modelo real)
+    name: Embedder local en ${{ matrix.triple }}
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: linux-x64-gnu, os: ubuntu-latest, rust_tests: true }
+          - { triple: linux-arm64-gnu, os: ubuntu-24.04-arm }
+          - { triple: darwin-arm64, os: macos-latest }
+          - { triple: win32-x64-msvc, os: windows-latest }
+          # musl se ejecuta en un contenedor Alpine con Bun (el runner es glibc).
+          - { triple: linux-x64-musl, os: ubuntu-latest, alpine: true }
     env:
       HIVEDB_MODEL_DIR: ${{ github.workspace }}/.model-cache
+      HIVEDB_E2E_EMBEDDER: "1"
     steps:
       - uses: actions/checkout@v4
 
+      # La clave lleva la revisión fija del modelo (hivedb-embed/src/download.rs).
+      - name: Cache modelo
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: hivedb-model-614241f6-${{ matrix.triple }}
+
+      - name: Download bindings
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-${{ matrix.triple }}
+          path: packages/hive-db/
+
+      # Tests de Rust con el modelo real (una sola plataforma: son iguales en todas).
       - name: Install Rust toolchain
+        if: ${{ matrix.rust_tests }}
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
+        if: ${{ matrix.rust_tests }}
         uses: actions/cache@v4
         with:
           path: |
@@ -245,36 +273,53 @@ jobs:
             target
           key: embedder-e2e-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      # La clave lleva la revisión fija del modelo (hivedb-embed/src/download.rs).
-      - name: Cache modelo
-        uses: actions/cache@v4
-        with:
-          path: .model-cache
-          key: hivedb-model-614241f6
-
       - name: Tests del embedder con el modelo real
-        run: cargo test -p hivedb-embed --locked -- --ignored
+        if: ${{ matrix.rust_tests }}
+        run: cargo test -p hivedb-embed --locked -- --include-ignored
 
+      # --- Plataformas con runner propio ---
       - name: Setup Bun
+        if: ${{ !matrix.alpine }}
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
 
       - name: Install dependencies
+        if: ${{ !matrix.alpine }}
         working-directory: packages/hive-db
         run: bun install --frozen-lockfile
 
-      - name: Download linux-x64-gnu bindings
-        uses: actions/download-artifact@v4
-        with:
-          name: bindings-linux-x64-gnu
-          path: packages/hive-db/
+      # Descarga (o confirma en caché) el modelo con la API pública. Reintenta una vez por si
+      # Hugging Face tiene un fallo puntual.
+      - name: Preparar el modelo (prepareEmbedder)
+        if: ${{ !matrix.alpine }}
+        working-directory: packages/hive-db
+        shell: bash
+        run: |
+          for attempt in 1 2; do
+            bun -e "import { HiveDB } from './src/index.ts'; let last = ''; const p = await HiveDB.prepareEmbedder({ onProgress: (e) => { const pct = Math.floor((100 * e.downloaded) / e.total); const line = e.file + ' ' + pct + '%'; if (line !== last && pct % 20 === 0) console.log(line); last = line; } }); console.log(JSON.stringify(p));" && break
+            echo "intento $attempt fallido"; [ "$attempt" = 2 ] && exit 1; sleep 10
+          done
 
       - name: Bun E2E con el binario construido
+        if: ${{ !matrix.alpine }}
         working-directory: packages/hive-db
-        env:
-          HIVEDB_E2E_EMBEDDER: "1"
+        shell: bash
         run: bun test test/embedder_local.test.ts
+
+      # --- musl: contenedor Alpine ---
+      - name: Bun E2E en Alpine (musl)
+        if: ${{ matrix.alpine }}
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w/packages/hive-db \
+            -e HIVEDB_MODEL_DIR=/w/.model-cache -e HIVEDB_E2E_EMBEDDER=1 \
+            oven/bun:1.4.2-alpine sh -c '
+              bun install --frozen-lockfile &&
+              for attempt in 1 2; do
+                bun -e "import { HiveDB } from \"./src/index.ts\"; console.log(JSON.stringify(await HiveDB.prepareEmbedder()));" && break
+                [ "$attempt" = 2 ] && exit 1; sleep 10
+              done &&
+              bun test test/embedder_local.test.ts'
 
   publish:
     name: Publish to npm + GitHub Release
