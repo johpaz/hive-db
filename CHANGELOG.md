@@ -5,6 +5,8 @@ la API puede cambiar entre versiones menores.
 
 ## Sin publicar
 
+## 0.6.1 — 2026-10-08
+
 ## 0.6.0 — 2026-10-07
 
 ### Rendimiento
