@@ -102,7 +102,7 @@ Windows x64: no necesitas Rust instalado. La guía de uso, con ejemplos de cada 
 > (~470 MB) no viajan en el paquete**: se descargan la primera vez que lo activas —la única conexión
 > de red del motor— con tiempos máximos, reintentos y reanudación. Para no esperar en silencio, llama
 > antes a `HiveDB.prepareEmbedder({ onProgress })`; con `HIVEDB_OFFLINE=1` nunca accede a la red y se puede
-> llevar el modelo de antemano a máquinas sin red. Detalle en la [guía](docs/USER_GUIDE.md) (§5).
+> llevar el modelo de antemano a máquinas sin red. Detalle en la [guía](docs/USER_GUIDE.md) (§5). El modelo es **uno por aplicación**: todas las bases del proceso comparten una sola copia en memoria y los ficheros se descargan una vez por máquina, no por usuario ([multiusuario](docs/AGENT_GUIDE.md), §5.7).
 
 ```ts
 await HiveDB.prepareEmbedder({ onProgress: (p) => console.log(p.file, p.downloaded, "/", p.total) });

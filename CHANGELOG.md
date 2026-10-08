@@ -82,6 +82,12 @@ Comparación con sqlite-vec, LanceDB y libSQL (Turso embebido) y metodología en
   corromperían en silencio.
 
 ### Corregido
+- **Un modelo por aplicación, no por base:** cada `open({ embedder: "local" })` cargaba su propia copia del
+  modelo (~735 MiB), así que 4 bases ocupaban 2,9 GB. Ahora todas las bases del proceso comparten una sola
+  instancia (`LocalEmbedder::shared`): 813 MiB con 4 bases (~12 MiB por base adicional).
+- **Las operaciones sobre una misma base se serializaban:** el binding mantenía un `Mutex` durante toda la
+  operación, de modo que 16 consultas concurrentes tardaban lo mismo que 16 en fila (742 ms). Ahora el candado
+  es de lectura/escritura y se reparten por los núcleos: 119 ms (~130 consultas/s con embedding).
 - **Búsqueda híbrida no determinista:** con la misma puntuación RRF (muy frecuente, p. ej. con `k = 1`), el orden
   dependía del orden de un `HashMap` y cambiaba entre ejecuciones. Ahora el desempate es total y reproducible
   (puntuación, mejor puesto en alguna lista, id). Era la causa del fallo intermitente del test E2E del embedder.

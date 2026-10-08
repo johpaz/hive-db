@@ -267,7 +267,46 @@ de las colecciones. Funciona bien mientras: (a) **todas** las consultas lleven e
 ámbito, (b) los borrados masivos se acoten con un campo combinado, y (c) aceptes que un fallo de
 ámbito en tu código mezcla datos. Si necesitas aislamiento fuerte (datos regulados), una base por
 inquilino es más segura; abrir una base ya cuesta decenas de milisegundos, pero cada base es un
-directorio con su propio bloqueo exclusivo.
+directorio con su propio bloqueo exclusivo. Con el embedder local, ver además §5.7.
+
+### 5.7 Muchos usuarios o enjambres con el embedder local: un modelo por aplicación
+
+Cuando un SDK de agentes (hive-sdk, un servicio con LangGraph.js o LangChain.js…) usa HiveDB como
+memoria y cada usuario o enjambre tiene su espacio, **el modelo de embeddings es de la aplicación, no
+de cada usuario**:
+
+- **Se descarga una vez por máquina,** no por usuario ni por enjambre: vive en `HIVEDB_MODEL_DIR` (o en
+  la caché del usuario del sistema). En un servidor, fija `HIVEDB_MODEL_DIR` a un directorio común y
+  llama a `HiveDB.prepareEmbedder()` al arrancar.
+- **Se carga una sola vez por proceso.** Todas las bases abiertas con `embedder: "local"` comparten la
+  misma instancia del modelo. Medido: ~750 MiB para la primera base (el modelo) y **~12 MiB por cada base
+  adicional**; con 4 bases, 813 MiB en total (antes de la 0.6.1 cada base cargaba su propia copia: 2,9 GB).
+- **Las consultas concurrentes no se serializan.** Varias consultas a la vez, sobre la misma base o sobre
+  bases distintas, se reparten por los núcleos: 16 consultas simultáneas con embedding tardan 119 ms en
+  total (≈ 130 consultas/s en 16 hilos), frente a 742 ms en fila. El coste de CPU de cada consulta de texto
+  es lo que limita el caudal.
+
+Dos arquitecturas válidas, y cuándo elegir cada una:
+
+| | Una base compartida con filtro de inquilino | Una base por inquilino o enjambre |
+|---|---|---|
+| Memoria | La más baja | +~12 MiB por base abierta (más sus vectores mapeados) |
+| Aislamiento | Por filtro: un olvido del filtro mezcla datos | Por directorio |
+| Búsqueda vectorial | Con filtro → camino exacto, **coste proporcional al tamaño del inquilino** (ver abajo) | Sin filtro → grafo HNSW: 1–2 ms con 100k vectores |
+| Bases abiertas a la vez | 1 | Una por inquilino activo; ciérralas al terminar |
+
+**Coste de la búsqueda vectorial filtrada** (vectores aleatorios de 384 dimensiones en una base de
+20.000 documentos): 200 documentos por inquilino → 0,4 ms; 2.000 → 3,8 ms; 10.000 → 20 ms. Crece de forma
+lineal con el tamaño del inquilino porque el motor calcula el coseno exacto sobre sus documentos (garantiza
+los mejores `k`). Para memorias pequeñas (cientos o pocos miles de documentos por usuario) es inmediato; **si
+un inquilino llega a decenas de miles, dale su propia base.** Mezclar ambos modelos es válido: los pequeños
+comparten una base y los grandes tienen la suya.
+
+Límites que conviene saber:
+- Una base solo la abre un proceso a la vez: el servicio que atiende a los usuarios es el dueño de las bases.
+- El motor es una librería para Bun/Node (`@johpaz/hive-db`): se integra con LangGraph.js, LangChain.js o
+  hive-sdk. No hay binding para Python, así que LangChain/LangGraph en Python no pueden usarlo directamente.
+- Todas las bases de una aplicación usan el mismo modelo; cambiar de modelo obliga a reindexar (ver §4.4).
 
 ---
 
@@ -351,7 +390,7 @@ ACE y detección de bucles.
 - Una base con ámbito por filtro (§5.6) es correcta; asegura que **toda** consulta del índice lleve
   `tenant`, y revisa la retención del log causal antes de activarlo en producción.
 - Decide el modelo de embeddings **ahora**: cambiarlo después obliga a reindexar todos los
-  inquilinos. Para un servicio multiusuario, plantéate si el embedding lo hace el servidor (local)
+  inquilinos. Para un servicio multiusuario, plantéate si el embedding lo hace el servidor (local; es un único modelo compartido por todos los usuarios, ver §5.7)
   o una API; en ambos casos el `spaceId` debe ser único y estable.
 
 ---

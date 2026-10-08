@@ -8,7 +8,7 @@ use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::*;
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use tokio::task::JoinHandle;
 
 #[napi(object)]
@@ -185,14 +185,16 @@ pub struct JsPredicate {
     pub value: Option<String>,
 }
 
-/// Carga el embedder local fuera del hilo asíncrono: la primera vez descarga
-/// el modelo (~470 MB) y siempre lo mapea en memoria.
+/// Obtiene el embedder local compartido fuera del hilo asíncrono: la primera vez del proceso
+/// descarga el modelo (~470 MB, si falta) y lo carga; después devuelve la misma instancia.
 #[cfg(feature = "embedder-local")]
 async fn load_local_embedder() -> Result<Arc<dyn hivedb_core::Embedder>> {
-    tokio::task::spawn_blocking(hivedb_embed::LocalEmbedder::multilingual_e5_small)
+    // Una sola copia del modelo por proceso: todas las bases comparten la misma instancia en
+    // lugar de cargar ~735 MiB cada una.
+    tokio::task::spawn_blocking(hivedb_embed::LocalEmbedder::shared)
         .await
         .map_err(js_err)?
-        .map(|embedder| Arc::new(embedder) as Arc<dyn hivedb_core::Embedder>)
+        .map(|embedder| embedder as Arc<dyn hivedb_core::Embedder>)
         .map_err(js_err)
 }
 
@@ -564,7 +566,11 @@ fn parse_json_doc(json: &str) -> Result<serde_json::Value> {
 
 #[napi]
 pub struct JsHiveDB {
-    inner: Mutex<Option<Arc<HiveDB>>>,
+    /// `RwLock` y no `Mutex`: las operaciones comparten el candado de lectura, así que varias
+    /// consultas pueden ejecutarse a la vez sobre la misma base (con un `Mutex`, `with_db` lo
+    /// mantenía durante toda la operación y serializaba incluso las lecturas, embedding incluido).
+    /// `close()` toma el de escritura: espera a que terminen las operaciones en curso.
+    inner: RwLock<Option<Arc<HiveDB>>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -575,7 +581,7 @@ impl JsHiveDB {
     {
         let lock = self
             .inner
-            .lock()
+            .read()
             .map_err(|_| Error::from_reason("database lock poisoned"))?;
         match lock.as_ref() {
             Some(db) => f(db),
@@ -586,7 +592,7 @@ impl JsHiveDB {
     fn db_arc(&self) -> Result<Arc<HiveDB>> {
         let lock = self
             .inner
-            .lock()
+            .read()
             .map_err(|_| Error::from_reason("database lock poisoned"))?;
         lock.clone()
             .ok_or_else(|| Error::from_reason("database is closed"))
@@ -622,7 +628,7 @@ impl JsHiveDB {
             HiveDB::open_with_options(path, open_options).map_err(js_err)?
         };
         Ok(Self {
-            inner: Mutex::new(Some(Arc::new(db))),
+            inner: RwLock::new(Some(Arc::new(db))),
             runtime: tokio::runtime::Handle::current(),
         })
     }
@@ -1046,7 +1052,7 @@ impl JsHiveDB {
 
     #[napi]
     pub fn close(&mut self) {
-        let mut lock = self.inner.lock().unwrap();
+        let mut lock = self.inner.write().unwrap();
         *lock = None;
     }
 }

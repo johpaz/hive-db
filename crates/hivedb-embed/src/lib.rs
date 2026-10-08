@@ -17,12 +17,31 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
 use hivedb_index::{EmbedKind, Embedder, IndexError};
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 pub use download::{
     ModelFiles, Progress, default_cache_dir, ensure_multilingual_e5_small,
     ensure_multilingual_e5_small_with,
 };
+
+/// Instancia compartida del proceso (ver [`LocalEmbedder::shared`]).
+static SHARED: Mutex<Option<Arc<LocalEmbedder>>> = Mutex::new(None);
+
+/// Devuelve la instancia guardada en `slot` o la carga con `load`. El candado se mantiene
+/// durante la carga a propósito: dos peticiones simultáneas no cargan dos copias.
+fn shared_or_load<T>(
+    slot: &Mutex<Option<Arc<T>>>,
+    load: impl FnOnce() -> hivedb_index::Result<T>,
+) -> hivedb_index::Result<Arc<T>> {
+    let mut guard = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(existing) = guard.as_ref() {
+        return Ok(Arc::clone(existing));
+    }
+    let loaded = Arc::new(load()?);
+    *guard = Some(Arc::clone(&loaded));
+    Ok(loaded)
+}
 
 /// Textos por pasada del modelo. Acota la memoria de activaciones.
 const BATCH_SIZE: usize = 32;
@@ -60,6 +79,18 @@ impl LocalEmbedder {
     pub fn multilingual_e5_small() -> hivedb_index::Result<Self> {
         let files = ensure_multilingual_e5_small()?;
         Self::from_dir(files.dir(), files.space_id())
+    }
+
+    /// El embedder compartido por todo el proceso: **una sola copia del modelo en memoria**
+    /// (~735 MiB) para todas las bases que lo usen, en lugar de una por base abierta.
+    ///
+    /// La primera llamada carga el modelo (y lo descarga si falta); las siguientes devuelven la
+    /// misma instancia al instante. Si varios hilos lo piden a la vez, solo uno lo carga y los
+    /// demás esperan. Un fallo no se guarda: la siguiente llamada vuelve a intentarlo. La copia
+    /// vive hasta que termina el proceso (`LocalEmbedder` es `Sync`: varias consultas la usan a
+    /// la vez).
+    pub fn shared() -> hivedb_index::Result<Arc<Self>> {
+        shared_or_load(&SHARED, Self::multilingual_e5_small)
     }
 
     /// Como [`LocalEmbedder::multilingual_e5_small`], avisando del avance de la descarga
@@ -189,5 +220,44 @@ impl Embedder for LocalEmbedder {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn la_instancia_compartida_se_carga_una_sola_vez() {
+        let slot: Mutex<Option<Arc<u32>>> = Mutex::new(None);
+        let loads = AtomicUsize::new(0);
+        let results: Vec<Arc<u32>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        shared_or_load(&slot, || {
+                            loads.fetch_add(1, Ordering::SeqCst);
+                            // La carga real tarda: los demás hilos deben esperar, no cargar otra.
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            Ok(7)
+                        })
+                        .unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert!(results.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])));
+    }
+
+    #[test]
+    fn un_fallo_de_carga_no_se_guarda() {
+        let slot: Mutex<Option<Arc<u32>>> = Mutex::new(None);
+        let error = shared_or_load(&slot, || Err(IndexError::Embedder("sin red".into())));
+        assert!(error.is_err());
+        // La siguiente petición lo intenta de nuevo y funciona.
+        assert_eq!(*shared_or_load(&slot, || Ok(3)).unwrap(), 3);
     }
 }

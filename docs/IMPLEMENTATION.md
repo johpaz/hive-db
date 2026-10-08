@@ -333,6 +333,18 @@ hay red. Tests: `download.rs` (servidor HTTP local: descarga, corte y reanudaci�
 incorrecto, `Range` ignorado, parcial corrupto, bloqueo ajeno), `tests/local_model.rs` (modelo real, `#[ignore]`)
 y `tests/resume_real.rs` (reanudación contra Hugging Face de verdad a través de la redirección al CDN).
 
+**Una instancia por proceso.** `LocalEmbedder::shared()` guarda la instancia en un `static Mutex<Option<Arc<_>>>`
+(`shared_or_load`): la primera llamada carga el modelo (y lo descarga si falta); las demás devuelven el mismo
+`Arc`. El candado se mantiene durante la carga, así que dos peticiones simultáneas no cargan dos copias, y un fallo
+no se guarda. `load_local_embedder` de napi la usa, de modo que N bases abiertas con `embedder: "local"` comparten
+~750 MiB en total en vez de ~735 MiB cada una. La instancia vive hasta que termina el proceso.
+
+**Concurrencia.** `LocalEmbedder::embed` es `&self` y `Sync`: varias consultas se reparten por los núcleos (16
+consultas: 711 ms en serie, 118 ms con 16 hilos). En napi, `JsHiveDB.inner` es un `RwLock<Option<Arc<HiveDB>>>`:
+las operaciones toman el candado de lectura y `close()` el de escritura (espera a las operaciones en curso). Antes
+era un `Mutex` mantenido durante toda la operación, lo que serializaba incluso las lecturas (16 consultas
+simultáneas = 16 en fila).
+
 **En napi/TS.** `prepare_embedder(on_progress)` (`#[napi]` libre) llama a `ensure_…_with` en
 `spawn_blocking` y envía el progreso por un `ThreadsafeFunction`; en TS es `HiveDB.prepareEmbedder({ onProgress })`
 → `{ dir, spaceId, cached }`. Sin la feature `embedder-local` devuelve `EMBEDDER_UNAVAILABLE`.

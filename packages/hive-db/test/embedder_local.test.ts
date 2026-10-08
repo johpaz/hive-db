@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpus, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { HiveDB } from "../src/index.ts";
@@ -81,6 +81,56 @@ describe("embedder local", () => {
       expect(result.events.at(-1)?.downloaded).toBe(655);
       expect(result.events.at(-1)?.total).toBe(655);
       expect(existsSync(join(target, "config.json"))).toBe(true);
+    },
+    120_000
+  );
+
+  it.skipIf(!enabled)(
+    "varias bases comparten una sola copia del modelo en memoria",
+    async () => {
+      const rssMiB = () => process.memoryUsage.rss() / 1048576;
+      const open = () => HiveDB.open(":memory:", { embedder: "local" });
+      const first = await open();
+      const dbs = [first];
+      try {
+        const withOne = rssMiB();
+        for (let i = 0; i < 4; i++) dbs.push(await open());
+        // Cada copia del modelo son ~735 MiB: si cada base cargara la suya, esto crecería ~2,9 GB.
+        // Compartido, cada base extra cuesta solo su índice (decenas de MiB).
+        expect(rssMiB() - withOne).toBeLessThan(250);
+        // Y todas funcionan con el modelo compartido.
+        await dbs[3].upsertBatch([{ id: "x", body: "Cómo configurar tu cuenta de email" }]);
+        expect((await dbs[3].queryHybrid({ text: "correo electrónico", k: 1 }))[0]?.id).toBe("x");
+      } finally {
+        for (const db of dbs) db.close();
+      }
+    },
+    120_000
+  );
+
+  it.skipIf(!enabled || cpus().length < 4)(
+    "las consultas concurrentes sobre una base no se serializan",
+    async () => {
+      const db = await HiveDB.open(":memory:", { embedder: "local" });
+      try {
+        await db.upsertBatch([
+          { id: "a", body: "Cómo configurar tu cuenta de email" },
+          { id: "b", body: "Refund policy for cancelled orders" },
+        ]);
+        const query = (i: number) => db.queryHybrid({ text: `consulta ${i} sobre correo y pagos`, k: 2 });
+        for (let i = 0; i < 3; i++) await query(i); // calentamiento
+        const n = 12;
+        let t = performance.now();
+        for (let i = 0; i < n; i++) await query(i);
+        const sequential = performance.now() - t;
+        t = performance.now();
+        await Promise.all(Array.from({ length: n }, (_, i) => query(100 + i)));
+        const concurrent = performance.now() - t;
+        // Con el candado de la base mantenido durante la consulta, concurrent ≈ sequential.
+        expect(concurrent).toBeLessThan(sequential * 0.8);
+      } finally {
+        db.close();
+      }
     },
     120_000
   );

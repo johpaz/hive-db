@@ -131,6 +131,13 @@ const app = new Elysia()
                 },
                 { body: t.Object({ empty: t.Boolean() }) },
               )
+              .post(
+                "/api/gate",
+                async ({ session, body }) => ({
+                  allowed: await session!.colmena.gate(body.agent, "read", `memory:${body.target}`),
+                }),
+                { body: t.Object({ agent: t.String({ maxLength: 40 }), target: t.String({ maxLength: 40 }) }) },
+              )
               .post("/api/sim", ({ session, body }) => (session!.setRunning(body.running), { running: body.running }), {
                 body: t.Object({ running: t.Boolean() }),
               })
