@@ -88,31 +88,43 @@ y recibe el binario correcto para su SO sin necesitar Rust.
 2. **Cuenta npm con el scope `@johpaz`.** Publica con `--access public` (el workflow ya lo hace).
 3. **Token npm** de tipo *Automation* → guardarlo como secret `NPM_TOKEN` en el repo de GitHub (Settings → Secrets → Actions).
 
-### Flujo de release (local)
+### Flujo de release
+
+Un solo comando, desde la raíz del repositorio y con `main` al día y el árbol limpio:
 
 ```bash
-# 1. Subir la versión desde la raíz del paquete:
-cd packages/hive-db
-npm version patch   # o minor / major
-
-# Esto dispara los lifecycle scripts:
-#   preversion  → napi build --platform && git add .
-#   version     → napi version  (sincroniza subpaquetes npm/)
-#
-# 2. Push del tag:
-git push --follow-tags
+scripts/release.sh 0.6.0 --dry-run   # ensayo: comprueba y enseña los pasos, sin tocar nada
+scripts/release.sh 0.6.0             # o: patch | minor | major
 ```
 
-Al detectar el tag `v*`, el workflow `.github/workflows/ci.yml` job `publish`:
+El script (`scripts/release.sh`):
+
+1. Comprueba que estás en `main`, sin cambios sin commitear, al día con `origin/main`, que el tag no
+   existe y que `CHANGELOG.md` tiene una sección «Sin publicar».
+2. Ejecuta `cargo fmt`, `clippy` (también con `embedder-local`) y `cargo test` (`--no-checks` para saltarlos).
+3. Sube la versión en `Cargo.toml`, `packages/hive-db/package.json` (y los subpaquetes versionados),
+   refresca `Cargo.lock` y convierte «Sin publicar» del CHANGELOG en la versión con su fecha.
+4. Pide confirmación, crea el commit `chore(release): vX.Y.Z` y el tag anotado `vX.Y.Z`.
+5. Sube la rama y el tag de forma atómica (`git push --atomic origin main vX.Y.Z`).
+
+Al detectar el tag `v*`, el workflow `.github/workflows/ci.yml` ejecuta, por orden: lint y tests,
+tests del índice en Windows y macOS, compilación de los seis binarios (con el embedder local),
+tests de Bun, tests del embedder con el modelo real y, solo si todo pasó, el job `publish`:
 
 1. `napi create-npm-dirs` — regenera los subpaquetes `npm/<triple>/`.
 2. Descarga los binarios compilados en los runners de la matriz.
 3. `napi artifacts` — coloca cada `.node` en su subpaquete.
-4. Publica cada subpaquete: `npm publish ./npm/<triple> --access public`.
+4. Publica cada subpaquete: `npm publish ./npm/<triple> --access public` (se omite el que ya esté publicado).
 5. Compila el TypeScript (`tsc`).
 6. Publica el paquete principal: `npm publish --access public`.
+7. Crea la GitHub Release con los binarios.
 
-También puedes lanzarlo a mano desde la pestaña Actions (`workflow_dispatch`).
+Si algo falla a medias, corrige y vuelve a lanzar el job desde la pestaña Actions: la publicación es
+idempotente. Para repetir una versión que no llegó a publicarse hay que borrar el tag
+(`git push --delete origin vX.Y.Z && git tag -d vX.Y.Z`) y repetir el script.
+
+También puedes lanzar el workflow a mano desde la pestaña Actions (`workflow_dispatch`): compila y
+prueba, pero **no publica** (solo publican los tags `v*`).
 
 ### Publicación manual (sin CI)
 
