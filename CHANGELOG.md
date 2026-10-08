@@ -5,6 +5,8 @@ la API puede cambiar entre versiones menores.
 
 ## Sin publicar
 
+## 0.7.0 — 2026-10-08
+
 ### Añadido
 - **Binding Python: paquete `johpaz-hive-db` en PyPI** (el equivalente al scope `@johpaz/` de npm) (`import hivedb`). Mismo motor y mismas garantías que el
   paquete npm: registro de eventos, colecciones con versión optimista, búsqueda híbrida, suscripciones y
