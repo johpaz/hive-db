@@ -1,6 +1,0 @@
-nprobes=1 ef=def refine=def vector_p50_us=1814 vector_p99_us=2554 recall_at_10=0.5901 
-nprobes=20 ef=100 refine=def vector_p50_us=2288 vector_p99_us=3269 recall_at_10=0.9191 
-nprobes=20 ef=400 refine=def vector_p50_us=3118 vector_p99_us=4018 recall_at_10=0.9654 
-nprobes=50 ef=800 refine=def vector_p50_us=4704 vector_p99_us=8296 recall_at_10=0.9695 
-nprobes=100 ef=1600 refine=def vector_p50_us=6316 vector_p99_us=8559 recall_at_10=0.9724 
-nprobes=100 ef=3200 refine=10 vector_p50_us=9872 vector_p99_us=13076 recall_at_10=0.9998 

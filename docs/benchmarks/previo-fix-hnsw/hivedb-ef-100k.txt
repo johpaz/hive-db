@@ -1,9 +1,0 @@
-ef=50 recall_at_10=0.2681 vector_p50_us=687 vector_p99_us=1359
-ef=100 recall_at_10=0.3479 vector_p50_us=1100 vector_p99_us=2439
-ef=200 recall_at_10=0.4328 vector_p50_us=1753 vector_p99_us=3976
-ef=400 recall_at_10=0.5389 vector_p50_us=2802 vector_p99_us=6106
-ef=800 recall_at_10=0.6619 vector_p50_us=4604 vector_p99_us=10370
-ef=1600 recall_at_10=0.7778 vector_p50_us=10539 vector_p99_us=16432
-ef=3200 recall_at_10=0.8862 vector_p50_us=24627 vector_p99_us=28543
-recall_at_10=0.4328
-recall_at_10_tras_reabrir=0.4328

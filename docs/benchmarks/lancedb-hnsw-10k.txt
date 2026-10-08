@@ -1,7 +1,0 @@
-# lancedb-hnsw docs=10000 consultas=1000 dim=384 k=10
-ingesta_docs_por_s=6847
-vector_p50_us=1817 vector_p99_us=2687
-recall_at_10=0.8930
-arranque_en_frio_ms=10
-disco_mib=20.2
-rss_mib=358.6
