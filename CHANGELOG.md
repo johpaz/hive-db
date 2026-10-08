@@ -5,6 +5,8 @@ la API puede cambiar entre versiones menores.
 
 ## Sin publicar
 
+## 0.6.0 — 2026-10-07
+
 ### Rendimiento
 
 **Cifras actuales,** con 100.000 frases reales de Wikipedia (español e inglés, `multilingual-e5-small`,

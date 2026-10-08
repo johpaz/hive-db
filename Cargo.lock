@@ -959,7 +959,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hivedb-bench"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "hivedb-index",
  "tempfile",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "hivedb-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "bincode",
  "dashmap",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "hivedb-embed"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "hivedb-index"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "hivedb-napi"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "hivedb-core",
  "hivedb-embed",
