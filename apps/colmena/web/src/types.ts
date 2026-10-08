@@ -74,4 +74,5 @@ export type Msg =
   | QueryMsg
   | { t: "invalidate"; id: string; seq: number; agent: string }
   | { t: "gate"; agent: string; action: string; resource: string; allowed: boolean }
-  | { t: "stats"; stats: Stats };
+  | { t: "stats"; stats: Stats }
+  | { t: "reset" };

@@ -1,0 +1,8 @@
+**/node_modules
+**/target
+target
+.git
+**/dist
+**/*.node
+docs
+apps/colmena/data

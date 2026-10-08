@@ -7,7 +7,8 @@
   "scripts": {
     "dev:server": "bun --watch server/src/index.ts",
     "start": "bun server/src/index.ts",
-    "typecheck": "tsc --noEmit -p server"
+    "typecheck": "tsc --noEmit -p server",
+    "test": "bun test server/test"
   },
   "dependencies": {
     "@johpaz/hive-db": "file:../../packages/hive-db",

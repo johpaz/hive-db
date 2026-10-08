@@ -6,6 +6,7 @@ import { Beams, Rings } from "./Effects";
 import { Agents } from "./Agents";
 import { EventHelix } from "./EventHelix";
 import { WorkingRing } from "./WorkingRing";
+import { CameraRig } from "./CameraRig";
 
 export function Scene() {
   return (
@@ -24,7 +25,8 @@ export function Scene() {
       <Agents />
       <EventHelix />
       <WorkingRing />
-      <OrbitControls enableDamping dampingFactor={0.08} autoRotate autoRotateSpeed={0.35} maxDistance={110} minDistance={8} />
+      <CameraRig />
+      <OrbitControls makeDefault enableDamping dampingFactor={0.08} autoRotate autoRotateSpeed={0.35}  maxDistance={110} minDistance={8} />
       <EffectComposer>
         <Bloom intensity={0.7} luminanceThreshold={0.32} luminanceSmoothing={0.4} mipmapBlur />
       </EffectComposer>

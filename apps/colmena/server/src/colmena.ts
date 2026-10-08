@@ -53,7 +53,8 @@ export type Msg =
     }
   | { t: "invalidate"; id: string; seq: number; agent: string }
   | { t: "gate"; agent: string; action: string; resource: string; allowed: boolean }
-  | { t: "stats"; stats: Stats };
+  | { t: "stats"; stats: Stats }
+  | { t: "reset" };
 
 export interface Stats {
   docs: number;
@@ -67,6 +68,8 @@ export interface Stats {
 }
 
 const STREAM = "memory";
+export const OWN_TOPIC = "propio";
+export type QueryMode = "hybrid" | "text" | "vector";
 
 export class Colmena {
   readonly agents: AgentSpec[] = AGENTS;
@@ -105,7 +108,9 @@ export class Colmena {
   private async seed(n: number) {
     const r = rng(7);
     const staged: { id: string; agent: AgentSpec; topic: string; text: string; vec: Float32Array }[] = [];
-    for (let i = 0; i < n; i++) {
+    // La base PCA se ajusta siempre con un corpus de referencia, aunque la colmena arranque vacía.
+    const fitN = n === 0 ? 240 : n;
+    for (let i = 0; i < fitN; i++) {
       const agent = AGENTS[i % AGENTS.length]!;
       const topicId = pick(r, agent.topics);
       const topic = TOPICS.find((t) => t.id === topicId)!;
@@ -113,6 +118,9 @@ export class Colmena {
       staged.push({ id: `m${++this.counter}`, agent, topic: topic.id, text, vec: embed(text) });
     }
     this.pca.fit(staged.map((s) => s.vec));
+    staged.length = n;
+    this.counter = n;
+    if (n === 0) return;
     await this.db.upsertBatch(
       staged.map((s) => ({
         id: s.id,
@@ -146,7 +154,7 @@ export class Colmena {
   snapshot() {
     return {
       agents: this.agents,
-      topics: TOPICS.map(({ id, label, color }) => ({ id, label, color })),
+      topics: [...TOPICS.map(({ id, label, color }) => ({ id, label, color })), { id: OWN_TOPIC, label: "Tus recuerdos", color: "#ffffff" }],
       docs: [...this.docs.values()],
       stats: this.stats(),
     };
@@ -191,10 +199,11 @@ export class Colmena {
     return seq;
   }
 
-  async remember(agent: string, text: string, causation?: number): Promise<DocRec> {
+  async remember(agent: string, text: string, causation?: number, maxDocs = Infinity): Promise<DocRec> {
+    if (this.docs.size >= maxDocs) throw new Error("LIMIT: la colmena alcanzó su tope de recuerdos");
     const vec = embed(text);
     const id = `m${++this.counter}`;
-    const topic = topicOf(text) ?? "viajes";
+    const topic = agent === "tú" ? OWN_TOPIC : (topicOf(text) ?? OWN_TOPIC);
     await this.db.upsertDoc({ id, body: text, tags: topic, vector: vec, filters: [{ field: "agent", value: agent }] });
     const seq = await this.logEvent(agent, "Fact", { docId: id, text, topic }, text, causation ?? this.lastFactByAgent.get(agent), id);
     this.lastFactByAgent.set(agent, seq);
@@ -206,13 +215,24 @@ export class Colmena {
     return doc;
   }
 
-  async recall(agent: string, text: string, opts: { k?: number; crossAgent?: boolean; efSearch?: number } = {}) {
+  async recall(agent: string, text: string, opts: { k?: number; crossAgent?: boolean; efSearch?: number; mode?: QueryMode; only?: string } = {}) {
     const k = opts.k ?? 5;
     const vec = embed(text);
-    const filters = opts.crossAgent ? undefined : [{ field: "agent", value: agent }];
+    const mode = opts.mode ?? "hybrid";
+    const filters = opts.only
+      ? [{ field: "agent", value: opts.only }]
+      : opts.crossAgent
+        ? undefined
+        : [{ field: "agent", value: agent }];
     const efSearch = opts.efSearch;
     const t0 = performance.now();
-    const fused = await this.db.queryHybrid({ text, vector: vec, k, filters, efSearch });
+    const fused = await this.db.queryHybrid({
+      text: mode === "vector" ? undefined : text,
+      vector: mode === "text" ? undefined : vec,
+      k,
+      filters,
+      efSearch,
+    });
     const latencyMs = performance.now() - t0;
     const [textOnly, vecOnly, trace] = await Promise.all([
       this.db.queryHybrid({ text, k: k + 3, filters }),
@@ -241,7 +261,7 @@ export class Colmena {
       text_hits: dec(textOnly),
       vector_hits: dec(vecOnly),
       fused: dec(fused),
-      filtered: !opts.crossAgent,
+      filtered: !!filters,
       hnsw: trace
         ? { steps: steps.slice(0, 220), total: trace.steps.length, layers: steps.reduce((m, x) => Math.max(m, x.layer), 0) + 1 }
         : null,

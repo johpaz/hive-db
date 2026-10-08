@@ -3,12 +3,129 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>La Colmena · HiveDB en vivo</title>
+    <title>La Colmena · HiveDB en vivo: memoria para agentes de IA en 3D</title>
+    <meta name="description" content="Prueba HiveDB en el navegador: crea tu propia base de memoria para agentes de IA, guarda recuerdos y consúltalos con búsqueda híbrida BM25 + vectorial HNSW + RRF, visualizado en 3D con WebGL." />
+    <meta name="keywords" content="HiveDB, memoria para agentes, base de datos para agentes de IA, búsqueda híbrida, BM25, HNSW, RRF, base de datos vectorial, Rust, WebGL, Three.js" />
+    <meta name="author" content="johpaz" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
+    <meta name="theme-color" content="#05060c" />
+    <link rel="canonical" href="https://hivebd.hiveagents.io/" />
+
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="La Colmena · HiveDB" />
+    <meta property="og:locale" content="es_ES" />
+    <meta property="og:url" content="https://hivebd.hiveagents.io/" />
+    <meta property="og:title" content="La Colmena · HiveDB en vivo" />
+    <meta property="og:description" content="Crea tu propia base de memoria para agentes de IA y consúltala con búsqueda híbrida, visualizada en 3D en tiempo real." />
+    <meta property="og:image" content="https://hivebd.hiveagents.io/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Logo de Hive y el título La Colmena, HiveDB en vivo en 3D" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="La Colmena · HiveDB en vivo" />
+    <meta name="twitter:description" content="Prueba el motor de memoria para agentes HiveDB en el navegador: BM25 + HNSW + RRF en 3D." />
+    <meta name="twitter:image" content="https://hivebd.hiveagents.io/og.png" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://hivebd.hiveagents.io/#website",
+            "url": "https://hivebd.hiveagents.io/",
+            "name": "La Colmena · HiveDB",
+            "inLanguage": "es",
+            "description": "Demo interactiva en 3D del motor de memoria para agentes de IA HiveDB."
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://hivebd.hiveagents.io/#app",
+            "name": "La Colmena (demo de HiveDB)",
+            "applicationCategory": "DeveloperApplication",
+            "operatingSystem": "Cualquiera con navegador compatible con WebGL",
+            "description": "Visualización WebGL en vivo de HiveDB, un motor de memoria para agentes de IA escrito en Rust con búsqueda híbrida BM25 + HNSW fusionada con RRF.",
+            "url": "https://hivebd.hiveagents.io/",
+            "image": "https://hivebd.hiveagents.io/og.png",
+            "license": "https://www.apache.org/licenses/LICENSE-2.0",
+            "isAccessibleForFree": true,
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+            "author": { "@type": "Person", "name": "johpaz", "url": "https://github.com/johpaz" },
+            "sameAs": ["https://github.com/johpaz/hive-db", "https://www.npmjs.com/package/@johpaz/hive-db"]
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "¿Qué es HiveDB?",
+                "acceptedAnswer": { "@type": "Answer", "text": "HiveDB es un motor de memoria para agentes de IA escrito en Rust. Guarda los recuerdos en un registro de eventos append-only y los consulta con búsqueda híbrida: BM25 para texto, HNSW para vectores y fusión RRF." }
+              },
+              {
+                "@type": "Question",
+                "name": "¿Qué puedo hacer en La Colmena?",
+                "acceptedAnswer": { "@type": "Answer", "text": "Puedes crear tu propia base aislada, guardar recuerdos, consultarlos en modo híbrido, solo texto o solo vector, ver la ruta real del índice HNSW en 3D y olvidar recuerdos. Cada visitante tiene su propia base temporal." }
+              },
+              {
+                "@type": "Question",
+                "name": "¿Los datos de la demo son reales?",
+                "acceptedAnswer": { "@type": "Answer", "text": "Sí: cada operación se ejecuta en el motor HiveDB real. Los agentes de ejemplo son simulados y los embeddings de la demo son un modelo sencillo de bolsa de palabras de 64 dimensiones, solo para visualizar." }
+              },
+              {
+                "@type": "Question",
+                "name": "¿Se guardan mis datos?",
+                "acceptedAnswer": { "@type": "Answer", "text": "No de forma permanente. Tu sesión usa una base temporal que se elimina tras 15 minutos de inactividad. No escribas información sensible." }
+              },
+              {
+                "@type": "Question",
+                "name": "¿Cómo uso HiveDB en mi proyecto?",
+                "acceptedAnswer": { "@type": "Answer", "text": "Instala el paquete npm @johpaz/hive-db (binding nativo para Node y Bun) o usa los crates de Rust. El código está en github.com/johpaz/hive-db bajo licencia Apache-2.0." }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   </head>
   <body>
     <div id="root"></div>
+
+    <!-- Contenido textual para buscadores, lectores de pantalla y asistentes de IA (la escena 3D es un canvas sin texto). -->
+    <main class="seo">
+      <h1>La Colmena: HiveDB en vivo, la memoria de agentes de IA en 3D</h1>
+      <p>
+        La Colmena es una demo interactiva de HiveDB, un motor de memoria para agentes de IA escrito en Rust. Crea tu propia base,
+        guarda recuerdos y consúltalos con búsqueda híbrida (BM25 + HNSW + fusión RRF) mientras ves el motor trabajar en una escena WebGL.
+      </p>
+      <h2>Qué muestra</h2>
+      <ul>
+        <li>Cada recuerdo es un punto en el espacio vectorial; los recuerdos parecidos forman nubes por tema.</li>
+        <li>El registro de eventos append-only aparece como una hélice, con cadenas causales entre eventos.</li>
+        <li>Cada consulta anima la ruta real del índice HNSW, los términos BM25 y la fusión RRF de los resultados.</li>
+        <li>Invalidar un recuerdo lo apaga y lo excluye de las consultas siguientes.</li>
+      </ul>
+      <h2>Preguntas frecuentes</h2>
+      <h3>¿Se guardan mis datos?</h3>
+      <p>No permanentemente: cada visitante tiene una base temporal aislada que se elimina tras 15 minutos de inactividad.</p>
+      <h3>¿Es el motor real?</h3>
+      <p>Sí. Las operaciones usan HiveDB (Rust, licencia Apache-2.0). Los agentes de ejemplo y el embedder de 64 dimensiones son de demostración.</p>
+      <p>
+        <a href="https://github.com/johpaz/hive-db">Código en GitHub</a> ·
+        <a href="https://www.npmjs.com/package/@johpaz/hive-db">Paquete npm @johpaz/hive-db</a> ·
+        <a href="/llms.txt">llms.txt</a>
+      </p>
+    </main>
+    <noscript>La Colmena necesita JavaScript y WebGL para mostrar la escena 3D de HiveDB.</noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

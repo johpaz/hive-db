@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { api, ApiError, ensureSession, currentSid } from "./api";
 import { addBeam, addRing, agentFlash, agentPos, COLORS, hex, now } from "./fx";
 import type { AgentInfo, DocRec, EventMsg, Msg, QueryMsg, Stats, TopicInfo } from "./types";
 
@@ -13,6 +14,7 @@ interface FeedItem {
 
 interface State {
   connected: boolean;
+  error: string | null;
   agents: AgentInfo[];
   topics: TopicInfo[];
   docs: DocRec[];
@@ -22,8 +24,14 @@ interface State {
   events: EventMsg[];
   feed: FeedItem[];
   lastQuery: QueryMsg | null;
+  running: boolean;
+  lab: boolean;
+  setLab(on: boolean): void;
+  reload(): Promise<void>;
   selected: string | null;
   selectedEvent: number | null;
+  tour: number | null;
+  setTour(step: number | null): void;
   selectEvent(seq: number | null): void;
   highlight: Map<string, number>;
   init(): void;
@@ -35,6 +43,7 @@ let started = false;
 
 export const useStore = create<State>((set, get) => ({
   connected: false,
+  error: null,
   agents: [],
   topics: [],
   docs: [],
@@ -44,8 +53,17 @@ export const useStore = create<State>((set, get) => ({
   events: [],
   feed: [],
   lastQuery: null,
+  running: true,
+  lab: false,
+  setLab: (lab) => set(lab ? { lab, tour: null } : { lab }),
+  async reload() {
+    const snap = await api<Snapshot>("/snapshot");
+    applySnapshot(snap);
+  },
   selected: null,
   selectedEvent: null,
+  tour: null,
+  setTour: (step) => set({ tour: step }),
   selectEvent: (seq) => set({ selectedEvent: seq }),
   highlight: new Map(),
   select: (id) => set({ selected: id }),
@@ -53,14 +71,35 @@ export const useStore = create<State>((set, get) => ({
     if (started) return;
     started = true;
     (async () => {
-      const snap = await (await fetch("/api/snapshot")).json();
-      const docIndex = new Map<string, number>();
-      snap.docs.forEach((d: DocRec, i: number) => docIndex.set(d.id, i));
-      set({ agents: snap.agents, topics: snap.topics, docs: snap.docs, docIndex, docsVersion: 1, stats: snap.stats });
-      connect();
+      try {
+        applySnapshot(await api<Snapshot>("/snapshot"));
+        connect();
+      } catch (e) {
+        started = false;
+        const full = e instanceof ApiError && (e.status === 503 || e.status === 429);
+        set({ error: e instanceof Error ? e.message : String(e) });
+        if (full) setTimeout(() => get().init(), 15_000);
+      }
     })();
   },
 }));
+
+type Snapshot = { agents: AgentInfo[]; topics: TopicInfo[]; docs: DocRec[]; stats: Stats; running: boolean };
+
+function applySnapshot(snap: Snapshot) {
+  const docIndex = new Map<string, number>();
+  snap.docs.forEach((d, i) => docIndex.set(d.id, i));
+  useStore.setState((s) => ({
+    agents: snap.agents,
+    topics: snap.topics,
+    docs: snap.docs,
+    docIndex,
+    docsVersion: s.docsVersion + 1,
+    stats: snap.stats,
+    running: snap.running,
+    error: null,
+  }));
+}
 
 function pushFeed(item: Omit<FeedItem, "id" | "ts">) {
   const feed = [{ ...item, id: ++feedId, ts: Date.now() }, ...useStore.getState().feed].slice(0, 40);
@@ -75,10 +114,21 @@ function agentIdx(id: string) {
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/live`);
+  const ws = new WebSocket(`${proto}://${location.host}/live?sid=${currentSid()}`);
   ws.onopen = () => useStore.setState({ connected: true });
-  ws.onclose = () => {
+  ws.onclose = async () => {
     useStore.setState({ connected: false });
+    // Si la sesión expiró, el servidor cerró el socket: pide otra y recarga el estado.
+    try {
+      const r = await fetch("/api/snapshot", { headers: { "x-sid": currentSid() ?? "" } });
+      if (r.status === 401) {
+        await ensureSession(true);
+        started = false;
+        useStore.setState({ docs: [], docIndex: new Map(), events: [], feed: [], lastQuery: null, selected: null, selectedEvent: null });
+        useStore.getState().init();
+        return;
+      }
+    } catch {}
     setTimeout(connect, 1500);
   };
   ws.onmessage = (e) => handle(JSON.parse(e.data) as Msg);
@@ -90,6 +140,10 @@ function handle(m: Msg) {
   switch (m.t) {
     case "stats":
       useStore.setState({ stats: m.stats });
+      break;
+    case "reset":
+      useStore.setState({ events: [], feed: [], lastQuery: null, selected: null, selectedEvent: null, highlight: new Map() });
+      void useStore.getState().reload();
       break;
     case "doc": {
       if (s.docIndex.has(m.doc.id)) break;

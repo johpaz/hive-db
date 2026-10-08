@@ -2,6 +2,7 @@ import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { Scene } from "./scene/Scene";
 import { Hud } from "./Hud";
+import { TourPanel } from "./TourPanel";
 import { useStore } from "./store";
 import "./styles.css";
 
@@ -11,6 +12,7 @@ function App() {
     <>
       <Scene />
       <Hud />
+      <TourPanel />
     </>
   );
 }

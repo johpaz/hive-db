@@ -1,0 +1,25 @@
+# La Colmena · HiveDB en vivo
+
+> Demo interactiva en 3D (WebGL) de HiveDB, un motor de memoria para agentes de IA escrito en Rust. Cada visitante crea su propia base temporal, guarda recuerdos y los consulta con búsqueda híbrida BM25 + HNSW + fusión RRF.
+
+## Qué es HiveDB
+- Motor de memoria para agentes de IA en Rust (licencia Apache-2.0).
+- Registro de eventos append-only (redb), búsqueda de texto BM25 (tantivy), índice vectorial HNSW propio y fusión RRF.
+- Memoria de trabajo con TTL, invalidación de recuerdos, enlaces de causalidad entre eventos y grafo de consentimiento (`can()`).
+- Binding nativo para Node y Bun: paquete npm `@johpaz/hive-db`.
+
+## Qué hace la demo
+- Espacio vectorial: cada recuerdo es un punto 3D (proyección PCA); los parecidos quedan cerca.
+- Laboratorio: crear base vacía, guardar recuerdos, consultar en modo híbrido / solo texto / solo vector, ajustar k y efSearch, olvidar recuerdos.
+- Cada consulta anima la ruta real del HNSW y la fusión RRF.
+- Los agentes de ejemplo son simulados; el embedder de la demo es de bolsa de palabras de 64 dimensiones (solo ilustrativo, no es un modelo semántico).
+
+## Privacidad y límites
+- Base aislada por sesión, almacenada en disco temporal; se elimina tras 15 minutos de inactividad.
+- Límites: 8 sesiones simultáneas, 1500 recuerdos por sesión, 40 escrituras por minuto por IP.
+- No introduzcas información sensible.
+
+## Enlaces
+- [Demo](https://hivebd.hiveagents.io/)
+- [Código fuente de HiveDB](https://github.com/johpaz/hive-db)
+- [Paquete npm](https://www.npmjs.com/package/@johpaz/hive-db)

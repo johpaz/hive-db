@@ -1,25 +1,27 @@
 import { useState } from "react";
+import { api } from "./api";
 import { useStore } from "./store";
+import { Lab } from "./Lab";
 import { causalChain } from "./scene/EventHelix";
 
 const KIND_ICON: Record<string, string> = { event: "◆", query: "◎", gate: "⛨", invalidate: "✕" };
 
 export function Hud() {
-  const { stats, connected, feed, topics, agents, selected, docs, docIndex, lastQuery, events, selectedEvent } = useStore();
+  const { tour, error, stats, connected, feed, topics, agents, selected, docs, docIndex, lastQuery, events, selectedEvent, lab } = useStore();
   const chain = selectedEvent != null ? events.filter((e) => causalChain(events, selectedEvent).has(e.seq)) : [];
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
   const doc = selected ? docs[docIndex.get(selected) ?? -1] : undefined;
 
   const ask = async (text: string) => {
     if (!text.trim() || busy) return;
     setBusy(true);
     try {
-      await fetch("/api/query", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, agent: "tú", k: 6 }),
-      });
+      await api("/query", { body: { text, agent: "tú", k: 6 } });
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+      setTimeout(() => setMsg(null), 4000);
     } finally {
       setBusy(false);
     }
@@ -28,7 +30,7 @@ export function Hud() {
   return (
     <div className="hud">
       <header className="title">
-        <h1>LA COLMENA</h1>
+        <h1><img className="logo" src="/icon-192.png" alt="Logo de Hive" width={34} height={34} />LA COLMENA</h1>
         <p>HiveDB · motor de memoria para agentes · en vivo</p>
         <span className={connected ? "dot on" : "dot"}>{connected ? "conectado" : "reconectando…"}</span>
       </header>
@@ -52,7 +54,9 @@ export function Hud() {
         <p><i style={{ background: "#fff" }} />RRF (fusión) → top-k</p>
       </section>
 
-      <section className="panel feed">
+      <Lab />
+
+      <section className={"panel feed" + (lab ? " off" : "")}>
         <h3>Actividad real del motor</h3>
         <ul>
           {feed.slice(0, 14).map((f) => {
@@ -66,7 +70,7 @@ export function Hud() {
         </ul>
       </section>
 
-      {lastQuery && (
+      {lastQuery && !lab && (
         <section className="panel result">
           <h3>Última consulta · “{lastQuery.text}”</h3>
           {lastQuery.hnsw && (
@@ -99,13 +103,7 @@ export function Hud() {
           <p className="muted">tema: {doc.topic} · {doc.alive ? "vivo" : "invalidado"}</p>
           {doc.alive && (
             <button
-              onClick={() =>
-                fetch("/api/invalidate", {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ id: doc.id }),
-                })
-              }
+              onClick={() => api("/invalidate", { body: { id: doc.id } }).catch((e) => setMsg(String(e.message ?? e)))}
             >
               Olvidar este recuerdo
             </button>
@@ -125,7 +123,9 @@ export function Hud() {
         </section>
       )}
 
-      <p className="hint">Clic en una esfera de la hélice → su cadena causal · clic en un punto → su recuerdo · esferas junto a cada agente = working memory (TTL 30 s)</p>
+      {tour === null && <p className="hint">Clic en una esfera de la hélice → su cadena causal · clic en un punto → su recuerdo · esferas junto a cada agente = working memory (TTL 30 s)</p>}
+
+      {(error || msg) && <div className="toast">{error ?? msg}</div>}
 
       <form className="ask" onSubmit={(e) => (e.preventDefault(), ask(q))}>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Pregúntale a la colmena…  prueba: vuelo playa · rust bug · receta ajo" />

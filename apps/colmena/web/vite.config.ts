@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://localhost:3001", rewrite: (p) => p.replace(/^\/api/, "") },
+      "/api": { target: "http://localhost:3001" },
       "/live": { target: "ws://localhost:3001", ws: true },
     },
   },

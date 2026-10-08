@@ -1,0 +1,50 @@
+# Despliegue de La Colmena detrás de Traefik (HTTPS con Let's Encrypt).
+#   docker compose -f apps/colmena/docker-compose.yml pull && docker compose -f apps/colmena/docker-compose.yml up -d
+#   (sin acceso al registro: up -d --build compila la imagen localmente)
+# La red `n8n_evoapi` y el certresolver `mytlschallenge` ya existen en el servidor.
+services:
+  hive-db:
+    build:
+      context: ../..
+      dockerfile: apps/colmena/Dockerfile
+    image: johpaz/hive-db-colmena:latest
+    container_name: hive-db
+    restart: unless-stopped
+    environment:
+      PORT: "5500"
+      MAX_SESSIONS: "${MAX_SESSIONS:-8}"
+      SESSION_IDLE_MIN: "${SESSION_IDLE_MIN:-15}"
+      MAX_DOCS: "${MAX_DOCS:-1500}"
+      WRITES_PER_MIN: "${WRITES_PER_MIN:-40}"
+      SESSIONS_PER_MIN: "${SESSIONS_PER_MIN:-6}"
+    # Las bases de sesión son temporales: viven en /tmp (RAM) y se pierden al reiniciar.
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    mem_limit: 1g
+    cpus: 1.5
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:5500/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - n8n_evoapi
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=n8n_evoapi
+      - traefik.http.routers.hive-db.rule=Host(`hivebd.hiveagents.io`)
+      - traefik.http.routers.hive-db.entrypoints=websecure
+      - traefik.http.routers.hive-db.tls=true
+      - traefik.http.routers.hive-db.tls.certresolver=mytlschallenge
+      - traefik.http.routers.hive-db.middlewares=hive-db-headers@docker
+      - traefik.http.middlewares.hive-db-headers.headers.SSLRedirect=true
+      - traefik.http.middlewares.hive-db-headers.headers.STSSeconds=315360000
+      - traefik.http.services.hive-db.loadbalancer.server.port=5500
+
+networks:
+  n8n_evoapi:
+    external: true

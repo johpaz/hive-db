@@ -7,6 +7,7 @@ export class AgentSimulator {
   private running = false;
   private r = rng(Date.now() & 0xffff);
   speed = 1;
+  maxDocs = Number(process.env.MAX_DOCS ?? 1500);
 
   constructor(private c: Colmena) {}
 
@@ -48,6 +49,7 @@ export class AgentSimulator {
   }
 
   async step(agentId: string) {
+    if (this.c.docs.size >= this.maxDocs) return;
     const agent = AGENTS.find((a) => a.id === agentId)!;
     const topicId = pick(this.r, agent.topics);
     const topic = TOPICS.find((t) => t.id === topicId)!;
