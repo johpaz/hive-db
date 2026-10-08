@@ -84,22 +84,26 @@ fn io_error(error: std::io::Error) -> crate::IndexError {
 
 impl SemanticStore {
     fn open(base: &Path, dim: Option<usize>) -> crate::Result<Self> {
+        migrate_legacy_store(base, dim)?;
         let db = Database::create(base.join(STORE_FILE)).map_err(storage_error)?;
         let txn = db.begin_write().map_err(storage_error)?;
         {
             txn.open_table(DOCS).map_err(storage_error)?;
             txn.open_table(META).map_err(storage_error)?;
+            // Señal para versiones anteriores (ver `DOCS_V1_TRIPWIRE`). En una base que
+            // venía del formato anterior ya la dejó la migración.
+            txn.open_table(DOCS_V1_TRIPWIRE).map_err(storage_error)?;
         }
         txn.commit().map_err(storage_error)?;
 
-        let mut store = Self {
+        let store = Self {
             db,
             base: base.to_path_buf(),
             dim,
             vectors: RwLock::new(None),
         };
+        let mut store = store;
         store.open_vector_file()?;
-        store.migrate_legacy_docs()?;
         Ok(store)
     }
 
@@ -149,104 +153,6 @@ impl SemanticStore {
     /// Vista de los vectores publicados; `None` si la base no tiene vectores.
     fn view(&self) -> Option<Arc<View>> {
         self.vector_file().map(|file| file.view())
-    }
-
-    /// Pasa los documentos del formato anterior (vector dentro del registro de
-    /// redb) al actual (vector en el fichero plano). Reanudable: cada tanda
-    /// mueve sus documentos y sus vectores en una sola transacción.
-    fn migrate_legacy_docs(&mut self) -> crate::Result<()> {
-        enum Legacy {
-            /// No hay tabla antigua ni señal de migración (base nueva).
-            Missing,
-            /// Tabla antigua con este número de documentos.
-            Present(u64),
-            /// Ya migrada: la tabla es la señal incompatible.
-            Migrated,
-        }
-        let legacy = {
-            let txn = self.db.begin_read().map_err(storage_error)?;
-            match txn.open_table(DOCS_V1) {
-                Ok(table) => Legacy::Present(table.len().map_err(storage_error)?),
-                Err(redb::TableError::TableDoesNotExist(_)) => Legacy::Missing,
-                Err(redb::TableError::TableTypeMismatch { .. }) => Legacy::Migrated,
-                Err(error) => return Err(storage_error(error)),
-            }
-        };
-        let pending = match legacy {
-            Legacy::Migrated => return Ok(()),
-            Legacy::Missing => 0,
-            Legacy::Present(count) => count,
-        };
-        let mut remaining = pending;
-        while remaining > 0 {
-            let batch: Vec<(String, IndexDoc)> = {
-                let txn = self.db.begin_read().map_err(storage_error)?;
-                let table = txn.open_table(DOCS_V1).map_err(storage_error)?;
-                let mut batch = Vec::new();
-                for entry in table.iter().map_err(storage_error)?.take(MIGRATION_BATCH) {
-                    let (key, value) = entry.map_err(storage_error)?;
-                    batch.push((
-                        key.value().to_string(),
-                        bincode::deserialize(&value.value())?,
-                    ));
-                }
-                batch
-            };
-            if batch.is_empty() {
-                break;
-            }
-            let file = self.vector_file();
-            let first = file.as_ref().map_or(0, |f| f.slots());
-            let rows: Vec<Vec<f32>> = batch
-                .iter()
-                .filter_map(|(_, doc)| doc.vector.as_deref().map(normalized))
-                .collect();
-            if !rows.is_empty() {
-                let file = file
-                    .as_ref()
-                    .ok_or(crate::IndexError::VectorIndexDisabled)?;
-                if rows.iter().any(|row| Some(row.len()) != self.dim) {
-                    return Err(crate::IndexError::Storage(
-                        "legacy document vector has a different dimension".into(),
-                    ));
-                }
-                let refs: Vec<&[f32]> = rows.iter().map(Vec::as_slice).collect();
-                file.write_rows(first, &refs).map_err(io_error)?;
-            }
-            let txn = self.db.begin_write().map_err(storage_error)?;
-            {
-                let mut legacy = txn.open_table(DOCS_V1).map_err(storage_error)?;
-                let mut docs = txn.open_table(DOCS).map_err(storage_error)?;
-                let mut next = first as u64;
-                for (key, mut doc) in batch.into_iter() {
-                    let slot = doc.vector.take().map(|_| {
-                        next += 1;
-                        next - 1
-                    });
-                    docs.insert(key.as_str(), bincode::serialize(&StoredDoc { doc, slot })?)
-                        .map_err(storage_error)?;
-                    legacy.remove(key.as_str()).map_err(storage_error)?;
-                    remaining = remaining.saturating_sub(1);
-                }
-                let mut meta = txn.open_table(META).map_err(storage_error)?;
-                meta.insert(VECTOR_SLOTS_KEY, next).map_err(storage_error)?;
-            }
-            txn.commit().map_err(storage_error)?;
-            if let Some(file) = file {
-                file.publish(first + rows.len()).map_err(io_error)?;
-            }
-        }
-        let txn = self.db.begin_write().map_err(storage_error)?;
-        if matches!(legacy, Legacy::Present(_)) {
-            txn.delete_table(DOCS_V1).map_err(storage_error)?;
-        }
-        txn.open_table(DOCS_V1_TRIPWIRE).map_err(storage_error)?;
-        txn.commit().map_err(storage_error)?;
-        if pending > 0 {
-            // El fichero de redb no se encoge solo al vaciar una tabla.
-            self.db.compact().map_err(storage_error)?;
-        }
-        Ok(())
     }
 
     fn generation(&self) -> crate::Result<u64> {
@@ -493,6 +399,148 @@ impl SemanticStore {
         })?;
         Ok(Some(generation))
     }
+}
+
+/// Pasa una base del formato anterior (el vector dentro del registro de cada documento, en la
+/// tabla `semantic_docs`) al actual: documentos sin vector en `semantic_docs_v2` y los vectores
+/// en el fichero plano.
+///
+/// Se escribe un fichero `redb` **nuevo** (`semantic.redb.migrating`) y, al terminar, sustituye
+/// al antiguo con un `rename`. El antiguo no se toca hasta ese momento, así que una interrupción
+/// en cualquier punto deja la base original intacta y la siguiente apertura repite la migración.
+/// (Copiar a otra tabla del mismo fichero y compactar dejaba el fichero más grande que antes: la
+/// compactación de `redb` no reclama bien los valores grandes.) Un fichero de vectores de un
+/// intento anterior se descarta: no hay ranuras confirmadas hasta que termina la migración.
+fn migrate_legacy_store(base: &Path, dim: Option<usize>) -> crate::Result<()> {
+    let path = base.join(STORE_FILE);
+    if !path.exists() {
+        return Ok(());
+    }
+    // ¿Es de un formato anterior? Se abre la base para ver si existe `semantic_docs` con
+    // claves de texto (la señal que deja la migración tiene otro tipo).
+    let legacy = Database::open(&path).map_err(storage_error)?;
+    let total = {
+        let txn = legacy.begin_read().map_err(storage_error)?;
+        match txn.open_table(DOCS_V1) {
+            Ok(table) => table.len().map_err(storage_error)?,
+            Err(
+                redb::TableError::TableDoesNotExist(_) | redb::TableError::TableTypeMismatch { .. },
+            ) => {
+                return Ok(());
+            }
+            Err(error) => return Err(storage_error(error)),
+        }
+    };
+
+    let migrating = base.join(format!("{STORE_FILE}.migrating"));
+    let _ = std::fs::remove_file(&migrating);
+    let new_db = Database::create(&migrating).map_err(storage_error)?;
+    let file = match dim {
+        Some(dim) => Some(
+            VectorFile::create_with(&vector_file_path(base, 0), dim, std::iter::empty())
+                .map_err(io_error)?,
+        ),
+        None => None,
+    };
+
+    let generation = {
+        let txn = legacy.begin_read().map_err(storage_error)?;
+        match txn.open_table(META) {
+            Ok(meta) => meta
+                .get(GENERATION_KEY)
+                .map_err(storage_error)?
+                .map_or(0, |v| v.value()),
+            Err(_) => 0,
+        }
+    };
+
+    let mut next_slot = 0usize;
+    let mut cursor: Option<String> = None;
+    let mut migrated = 0u64;
+    while migrated < total {
+        let batch: Vec<(String, IndexDoc)> = {
+            let txn = legacy.begin_read().map_err(storage_error)?;
+            let table = txn.open_table(DOCS_V1).map_err(storage_error)?;
+            let lower = match cursor.as_deref() {
+                Some(last) => std::ops::Bound::Excluded(last),
+                None => std::ops::Bound::Unbounded,
+            };
+            let mut batch = Vec::new();
+            for entry in table
+                .range::<&str>((lower, std::ops::Bound::Unbounded))
+                .map_err(storage_error)?
+                .take(MIGRATION_BATCH)
+            {
+                let (key, value) = entry.map_err(storage_error)?;
+                batch.push((
+                    key.value().to_string(),
+                    bincode::deserialize(&value.value())?,
+                ));
+            }
+            batch
+        };
+        let Some((last, _)) = batch.last() else { break };
+        cursor = Some(last.clone());
+
+        let rows: Vec<Vec<f32>> = batch
+            .iter()
+            .filter_map(|(_, doc)| doc.vector.as_deref().map(normalized))
+            .collect();
+        if !rows.is_empty() {
+            let file = file
+                .as_ref()
+                .ok_or(crate::IndexError::VectorIndexDisabled)?;
+            if rows.iter().any(|row| Some(row.len()) != dim) {
+                return Err(crate::IndexError::Storage(
+                    "legacy document vector has a different dimension".into(),
+                ));
+            }
+            let refs: Vec<&[f32]> = rows.iter().map(Vec::as_slice).collect();
+            file.write_rows(next_slot, &refs).map_err(io_error)?;
+        }
+
+        let txn = new_db.begin_write().map_err(storage_error)?;
+        {
+            let mut docs = txn.open_table(DOCS).map_err(storage_error)?;
+            let mut slot = next_slot as u64;
+            for (key, mut doc) in batch {
+                let assigned = doc.vector.take().map(|_| {
+                    slot += 1;
+                    slot - 1
+                });
+                docs.insert(
+                    key.as_str(),
+                    bincode::serialize(&StoredDoc {
+                        doc,
+                        slot: assigned,
+                    })?,
+                )
+                .map_err(storage_error)?;
+                migrated += 1;
+            }
+        }
+        txn.commit().map_err(storage_error)?;
+        next_slot += rows.len();
+    }
+
+    // Metadatos y señal para versiones anteriores, y todo sincronizado antes de sustituir.
+    let txn = new_db.begin_write().map_err(storage_error)?;
+    {
+        txn.open_table(DOCS).map_err(storage_error)?;
+        let mut meta = txn.open_table(META).map_err(storage_error)?;
+        meta.insert(GENERATION_KEY, generation)
+            .map_err(storage_error)?;
+        meta.insert(VECTOR_SLOTS_KEY, next_slot as u64)
+            .map_err(storage_error)?;
+        meta.insert(VECTOR_FILE_KEY, 0u64).map_err(storage_error)?;
+        txn.open_table(DOCS_V1_TRIPWIRE).map_err(storage_error)?;
+    }
+    txn.commit().map_err(storage_error)?;
+    drop(file);
+    drop(new_db);
+    drop(legacy);
+    std::fs::rename(&migrating, &path)?;
+    Ok(())
 }
 
 fn next_generation(meta: &mut redb::Table<'_, &str, u64>) -> crate::Result<u64> {

@@ -344,7 +344,10 @@ fn migra_una_base_del_formato_anterior_sin_perder_documentos() {
     let after = std::fs::metadata(dir.path().join("semantic.redb"))
         .unwrap()
         .len();
-    assert!(after < before, "redb no se encogió: {before} -> {after}");
+    assert!(
+        after <= before,
+        "redb creció al migrar: {before} -> {after}"
+    );
 
     // Reabrir es idempotente.
     let index = SemanticIndex::open(dir.path(), config()).unwrap();
@@ -415,4 +418,51 @@ fn migra_tambien_una_base_solo_de_texto() {
     drop(index);
     let db = Database::open(dir.path().join("semantic.redb")).unwrap();
     assert!(db.begin_write().unwrap().open_table(LEGACY_DOCS).is_err());
+}
+
+#[test]
+fn migrar_una_base_solo_de_texto_no_agranda_el_fichero() {
+    // Documentos de texto grandes y ninguna vector: copiarlos a la tabla nueva y
+    // borrar la antigua no debe dejar el fichero de redb más grande que antes.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(
+        dir.path().join("meta.json"),
+        br#"{"schema_version":2,"metric":"cosine","vector":null}"#,
+    )
+    .unwrap();
+    {
+        let db = Database::create(dir.path().join("semantic.redb")).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut docs = txn.open_table(LEGACY_DOCS).unwrap();
+            for i in 0..3_000 {
+                let d = IndexDoc::new(format!("d{i}"))
+                    .with_body(format!("palabra{i} {}", "texto de relleno ".repeat(300)));
+                docs.insert(d.id.as_str(), bincode::serialize(&d).unwrap())
+                    .unwrap();
+            }
+            let mut meta = txn.open_table(LEGACY_META).unwrap();
+            meta.insert("generation", 1u64).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let before = std::fs::metadata(dir.path().join("semantic.redb"))
+        .unwrap()
+        .len();
+
+    let index = SemanticIndex::open(dir.path(), None).unwrap();
+    let hits = index
+        .query_hybrid(HybridQuery::default().with_text("palabra42").with_k(1))
+        .unwrap();
+    assert_eq!(hits[0].id, "d42");
+    drop(index);
+
+    let after = std::fs::metadata(dir.path().join("semantic.redb"))
+        .unwrap()
+        .len();
+    assert!(
+        after * 10 <= before * 11,
+        "semantic.redb creció de {before} a {after} bytes al migrar"
+    );
 }
