@@ -52,21 +52,25 @@ los pasas en `vector`. Con una API, el texto sale hacia ese proveedor: por eso r
 
 ## Rendimiento
 
-Medido con 100.000 documentos de 384 dimensiones, k = 10, una sola máquina (Ryzen 9 6900HX).
-Los vectores son sintéticos y agrupados; el detalle, las curvas y los comandos para reproducirlo
-están en [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+Medido con **100.000 frases reales de Wikipedia** (español e inglés) embebidas con
+`multilingual-e5-small` (384 dimensiones), k = 10, en disco NVMe, una sola máquina (Ryzen 9 6900HX).
+La metodología, las curvas y los comandos para reproducirlo están en
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 | | Vector p50 | recall@10 | Arranque en frío | Disco | Búsqueda híbrida |
 |---|---:|---:|---:|---:|:---:|
-| **HiveDB** (HNSW) | 0,6–0,8 ms | 0,996 | 39 ms | 204 MiB | Sí (1,6–1,9 ms p50) |
-| sqlite-vec (exacto) | 65,5 ms | 1,00 | 67 ms | 149 MiB | No |
-| LanceDB (exacto) | 162,2 ms | 1,00 | 190 ms | 147 MiB | No |
-| LanceDB (IVF_HNSW_SQ, ajustado) | 2,4 ms | 0,95 | 79 ms | 203 MiB | No |
+| **HiveDB** (HNSW, `ef`=200) | **1,4 ms** | 0,982 | **46 ms** | 242,5 MiB | Sí (4,3 ms p50) |
+| sqlite-vec (exacto) | 71,1 ms | 0,9999 | 75 ms | 149,4 MiB | No |
+| LanceDB (exacto) | 162,6 ms | 0,9999 | 212 ms | 146,7 MiB | No |
+| LanceDB (IVF_HNSW_SQ, ajustado: `nprobes`=20, `ef`=400) | 3,1 ms | 0,965 | 89 ms | 203,0 MiB | No |
+| libSQL / Turso embebido (DiskANN `float8`) | 10,3 ms | 0,975 | 27 ms | 2 758 MiB | No |
 
-A igual recall la búsqueda vectorial de HiveDB es más rápida que la de LanceDB ajustado.
-Honestidad por delante: HiveDB **ocupa ~1,4× el disco de sqlite-vec e ingiere más despacio
-(~8k docs/s frente a 12k–109k)**, porque además indexa texto, mantiene el log y construye el grafo
-al insertar. Son datos sintéticos de una máquina: con embeddings reales el recall puede diferir.
+A igual recall, la búsqueda vectorial de HiveDB es más rápida que la de LanceDB ajustado y que la de
+libSQL, y su memoria anónima es de ~31 MiB (los vectores van mapeados desde disco). Honestidad por
+delante: HiveDB **ingiere más despacio (~4,9k documentos/s frente a 9,5k–88k) y ocupa ~1,6× el disco de
+sqlite-vec**, porque además indexa texto, mantiene el log y construye el grafo al insertar; y con el
+`ef` por defecto el recall es 0,982 (0,994 con `efSearch` = 400). Datos reales pero de una máquina y
+100.000 documentos: no se ha probado con millones.
 
 ## Cómo se compara
 

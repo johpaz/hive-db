@@ -272,7 +272,8 @@ Documentos y consultas deben producirse con el mismo modelo y configuración rep
 
 **Actualizar desde 0.5.x.** Las versiones posteriores a 0.5.x guardan los vectores en un fichero plano
 (`vectors.0.dat`) en vez de dentro de cada documento, lo que reduce el disco a la mitad. Al abrir una
-base de 0.5.x se migra sola (por tandas, reanudable si se interrumpe) y `meta.json` no se modifica.
+base de 0.5.x se migra sola (se escribe un fichero nuevo y solo se sustituye al terminar: si se
+interrumpe, la base original queda intacta y se repite) y `meta.json` no se modifica.
 Una vez migrada **no se puede abrir con 0.5.x**: esa versión falla con un error de tipo en la tabla
 `semantic_docs` en lugar de ver un índice vacío. Haz una copia del directorio antes de actualizar si
 quieres conservar la posibilidad de volver atrás. Los vectores se guardan normalizados (la métrica es
@@ -280,16 +281,17 @@ coseno), así que no se conserva su magnitud original.
 
 ### Rendimiento, precisión y disco
 
-Medido con 100.000 documentos de 384 dimensiones (detalle en [`BENCHMARKS.md`](BENCHMARKS.md)):
+Medido con 100.000 frases reales de Wikipedia (384 dimensiones, disco NVMe; detalle en [`BENCHMARKS.md`](BENCHMARKS.md)):
 
 | | |
 |---|---|
-| Búsqueda vectorial | ~0,6–0,8 ms (p50), ~1,2–1,6 ms (p99), recall@10 ≈ 0,996 con el `efSearch` por defecto |
-| Búsqueda híbrida (texto + vector) | ~1,6–1,9 ms (p50) |
-| Abrir una base ya poblada | ~40 ms (el grafo y el índice de texto se restauran del disco) |
-| Cerrar | ~50 ms |
-| Disco | ~204 MiB (146 MiB de vectores, 33 MiB de documentos, 20 MiB de grafo, 4 MiB de texto) |
-| Inserción por lotes | ~8 000 documentos/s (usa `upsertBatch`: enlaza el grafo en paralelo) |
+| Búsqueda vectorial | ~1,4 ms (p50), ~2 ms (p99), recall@10 ≈ 0,98 con el `efSearch` por defecto |
+| Búsqueda de texto / híbrida (texto + vector) | ~2,5 ms / ~4,3 ms (p50), con frases enteras como consulta |
+| Abrir una base ya poblada | ~46 ms (el grafo y el índice de texto se restauran del disco) |
+| Cerrar | ~42 ms |
+| Disco | ~243 MiB (146,5 MiB de vectores, 65 MiB de documentos, 20,5 MiB de grafo, 11 MiB de texto) |
+| Inserción por lotes | ~4 900 documentos/s (usa `upsertBatch`: enlaza el grafo en paralelo) |
+| Memoria | ~31 MiB anónimos + ~148 MiB de vectores mapeados desde disco (el sistema los puede liberar) |
 
 El grafo ANN es HNSW. Cada consulta puede ajustar el equilibrio entre precisión y velocidad con
 `efSearch` (por defecto 200); más alto es más preciso y más lento:
@@ -301,14 +303,14 @@ await db.queryHybrid({ vector, k: 10, efSearch: 800 }); // más preciso
 
 | `efSearch` | recall@10 | Vector p50 (100k docs) |
 |---:|---:|---:|
-| 50 | 0,87 | 0,4 ms |
-| 100 | 0,975 | 0,5 ms |
-| **200** (defecto) | 0,996 | 0,6 ms |
-| 400 | 0,997 | 1,0 ms |
-| 800 | 0,998 | 1,4 ms |
+| 50 | 0,858 | 0,5 ms |
+| 100 | 0,943 | 0,9 ms |
+| **200** (defecto) | 0,982 | 1,4 ms |
+| 400 | 0,994 | 2,5 ms |
+| 800 | 0,998 | 4,0 ms |
 
-Estas cifras son con vectores sintéticos agrupados; con tus embeddings el recall puede variar, así
-que mide con tus datos antes de bajar `efSearch`. Para indexar muchos documentos usa `upsertBatch`
+Estas cifras son con frases reales en español e inglés; con tus embeddings el recall puede variar, así
+que mide con tus datos antes de bajar `efSearch` (con 10 000 documentos ya da 0,997 con `ef`=200). Para indexar muchos documentos usa `upsertBatch`
 en lugar de `upsertDoc` en un bucle: es mucho más rápido.
 
 Los vectores se guardan una sola vez, en un fichero plano (`vectors.0.dat`), y **normalizados**: la

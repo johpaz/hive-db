@@ -203,10 +203,14 @@ operación y aumentan una generación dentro de la misma transacción `redb`.
 #### Migración desde el formato anterior
 
 Hasta la versión anterior el vector iba serializado dentro del registro del documento en la tabla
-`semantic_docs`. Al abrir una base así, `SemanticStore::open` mueve los documentos por tandas de 2.000
-a la tabla nueva (`semantic_docs_v2`) y sus vectores al fichero plano, cada tanda en una sola
-transacción; si se interrumpe, la siguiente apertura continúa donde quedó. Al terminar se compacta
-`semantic.redb`. `meta.json` **no se modifica** (el esquema sigue siendo 2).
+`semantic_docs`. Al abrir una base así, `migrate_legacy_store` escribe un fichero `redb` **nuevo**
+(`semantic.redb.migrating`) con los documentos sin vector en `semantic_docs_v2` (por tandas de 2.000) y
+los vectores normalizados en el fichero plano, y al terminar lo sustituye por el antiguo con un
+`rename`. El original no se toca hasta ese momento: una interrupción en cualquier punto lo deja intacto
+y la siguiente apertura repite la migración (un fichero de vectores de un intento anterior se descarta).
+Se hace así porque copiar a otra tabla del mismo fichero y compactar lo dejaba más grande que antes (la
+compactación de `redb` no reclama bien los valores grandes). `meta.json` **no se modifica** (el esquema
+sigue siendo 2).
 
 Para que una versión anterior no pueda abrir la base migrada y ver un índice vacío, `semantic_docs`
 se recrea vacía con claves `u64`: abrirla con claves `&str` falla con un error de tipo. No hay vuelta
@@ -249,10 +253,12 @@ hacía `panic!` con ficheros corruptos.
 ### Rendimiento
 
 El benchmark reproducible vive en `crates/hivedb-bench` (los comparadores de Python, en
-`comparadores/`). Con 100.000 documentos de 384 dimensiones y `ef = 200`: vector p50 0,6–0,8 ms, p99
-1,2–1,6 ms, recall@10 0,996, híbrido 1,6–1,9 ms, ingesta ~8.000 docs/s, apertura ~40 ms, cierre
-~50 ms, 204 MiB en disco. Las curvas de `ef`, la comparación con sqlite-vec y LanceDB y los comandos
-exactos están en [`BENCHMARKS.md`](BENCHMARKS.md). Si cambias el motor vectorial, vuelve a medir.
+`comparadores/`). Con 100.000 frases reales de 384 dimensiones, `ef = 200` y disco NVMe: vector p50
+1,4 ms (p99 ~2 ms), recall@10 0,982, texto 2,5 ms, híbrido 4,3 ms, ingesta ~4.900 docs/s, apertura
+~46 ms, cierre ~42 ms, 242,5 MiB en disco y ~31 MiB de memoria anónima. Las curvas de `ef`, la
+comparación con sqlite-vec, LanceDB y libSQL y los comandos exactos están en
+[`BENCHMARKS.md`](BENCHMARKS.md). Si cambias el motor vectorial, vuelve a medir (en un directorio en
+disco real: `/tmp` suele ser `tmpfs`).
 
 ### Filtros escalares
 

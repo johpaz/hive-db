@@ -156,9 +156,9 @@ Decisiones que se toman **una vez por base**:
 
 ### 4.5 Rendimiento: lo que conviene saber
 
-Con 100.000 documentos de 384 dimensiones ([`BENCHMARKS.md`](BENCHMARKS.md)): búsqueda vectorial
-~0,6–0,8 ms, híbrida ~1,6–1,9 ms, apertura ~40 ms, ~8.000 documentos/s al indexar por lotes y
-204 MiB en disco. Un catálogo de agente (cientos de documentos) es, por tanto, trivial para el
+Con 100.000 frases reales de 384 dimensiones ([`BENCHMARKS.md`](BENCHMARKS.md)): búsqueda vectorial
+~1,4 ms, texto ~2,5 ms, híbrida ~4,3 ms, apertura ~46 ms, ~4.900 documentos/s al indexar por lotes y
+~243 MiB en disco. Un catálogo de agente (cientos de documentos) es, por tanto, trivial para el
 motor; **lo que cuesta de verdad es calcular el embedding**, no buscarlo:
 
 - La consulta de texto con embedder local cuesta ~50 ms de CPU por embeber la frase. Si en cada

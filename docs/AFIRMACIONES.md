@@ -71,12 +71,12 @@ máquina de 16 hilos con disco NVMe**.
 
 | | HiveDB | Referencia |
 |---|---|---|
-| Búsqueda vectorial (p50 / p99) | 1,4 / 1,8 ms con recall 0,982 | LanceDB ajustado: ~3 ms con recall 0,965 |
+| Búsqueda vectorial (p50 / p99) | 1,4 / 1,8 ms con recall 0,982 | LanceDB ajustado: ~3 ms con recall 0,965 · libSQL (`float8`): 10 ms con recall 0,975 |
 | Con recall 0,994 | 2,5 / 3,5 ms | LanceDB: ~10 ms para 0,9998 |
 | Búsqueda de texto / híbrida (p50) | 2,5 ms / 4,3 ms | — |
 | Apertura de una base poblada | 46 ms | sqlite-vec 75 ms · LanceDB 89–212 ms |
-| Ingesta por lotes | ~4.900 docs/s | sqlite-vec 88.000 · LanceDB 9.500–65.000 |
-| Disco | 242,5 MiB | sqlite-vec 149 MiB · LanceDB 147–203 MiB |
+| Ingesta por lotes | ~4.900 docs/s | sqlite-vec 88.000 · LanceDB 9.500–65.000 · libSQL 79–524 |
+| Disco | 242,5 MiB | sqlite-vec 149 MiB · LanceDB 147–203 MiB · libSQL (`float8`) 2.758 MiB |
 | Memoria anónima del motor (tras reabrir y consultar) | ~31 MiB (+148 MiB de vectores mapeados desde disco) | — |
 
 Lo que **no** se ha medido y por tanto no se afirma: más de 100.000 documentos, varias máquinas,

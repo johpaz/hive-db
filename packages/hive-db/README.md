@@ -57,11 +57,11 @@ db.close();
 
 ## Rendimiento
 
-Con 100.000 documentos de 384 dimensiones (vectores sintéticos, una máquina de 16 hilos): búsqueda
-vectorial ~0,6–0,8 ms (p50) con recall@10 ≈ 0,996, búsqueda híbrida ~1,6–1,9 ms, apertura de una base
-poblada ~40 ms, inserción por lotes ~8.000 documentos/s y 204 MiB en disco. Cada consulta puede ajustar
-precisión y velocidad con `efSearch` (por defecto 200). Metodología, comparación con sqlite-vec y
-LanceDB y comandos para reproducirlo: [`docs/BENCHMARKS.md`](https://github.com/johpaz/hive-db/blob/main/docs/BENCHMARKS.md).
+Con 100.000 frases reales (384 dimensiones, disco NVMe): búsqueda vectorial ~1,4 ms (p50) con
+recall@10 ≈ 0,98, búsqueda híbrida ~4,3 ms, apertura de una base poblada ~46 ms, inserción por lotes
+~4.900 documentos/s, 243 MiB en disco y ~31 MiB de memoria anónima. Cada consulta puede ajustar
+precisión y velocidad con `efSearch` (por defecto 200). Metodología, comparación con sqlite-vec,
+LanceDB y libSQL y comandos para reproducirlo: [`docs/BENCHMARKS.md`](https://github.com/johpaz/hive-db/blob/main/docs/BENCHMARKS.md).
 Historial de cambios: [`CHANGELOG.md`](https://github.com/johpaz/hive-db/blob/main/CHANGELOG.md).
 
 ## Documentación completa
