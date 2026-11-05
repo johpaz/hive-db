@@ -76,7 +76,9 @@ from langgraph.graph import END, START, StateGraph
 
 db = HiveDB.open("./memoria")
 AGENTE, TAREA = "worker", "migracion"
-db.save_task_state(AGENTE, TAREA, {"objective": "Migrar la facturación", "plan": ["leer API", "mapear", "probar"]})
+db.save_task_state(
+    AGENTE, TAREA, {"objective": "Migrar la facturación", "plan": ["leer API", "mapear", "probar"]}
+)
 
 
 class Estado(TypedDict):
@@ -84,14 +86,15 @@ class Estado(TypedDict):
 
 
 def paso(_: Estado) -> Estado:
-    estado = db.load_task_state(AGENTE, TAREA)                 # 1. leer el estado
+    estado = db.load_task_state(AGENTE, TAREA)  # 1. leer el estado
     if not estado.plan:
         return {"hecho": True}
     siguiente, *resto = estado.plan
     # 2. una acción; el modelo recibe solo render_task_state(estado), no un historial
     resultado = hacer(siguiente, contexto=render_task_state(estado))
-    db.save_task_state(                                        # 3. escribir el estado nuevo
-        AGENTE, TAREA,
+    db.save_task_state(  # 3. escribir el estado nuevo
+        AGENTE,
+        TAREA,
         {**vars(estado), "changes": estado.changes + [resultado], "plan": resto},
         expected_version=estado.version,
     )

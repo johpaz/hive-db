@@ -356,7 +356,7 @@ class HiveDB:
         return [c.hit_out(h) for h in self._native.query_hybrid(query)]
 
     def embed_query(self, text: str) -> Optional[list]:
-        """Vector de consulta de `text` con el embedder de la base (`None` si no tiene o el texto está vacío)."""
+        """Vector de consulta de `text` con el embedder de la base; `None` si no hay embedder."""
         return self._native.embed_query(text)
 
     def trace_vector(

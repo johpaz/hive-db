@@ -380,7 +380,9 @@ jobs:
   test-python:
     name: pytest (Python ${{ matrix.python }})
     needs: wheels
-    runs-on: ubuntu-latest
+    # Fijo en 24.04: `ubuntu-latest` pasó a 26.04, donde setup-python no trae Python 3.9 (el mínimo que
+    # soporta el paquete: requires-python >= 3.9). Las wheels son manylinux_2_28, así que sirven igual.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
