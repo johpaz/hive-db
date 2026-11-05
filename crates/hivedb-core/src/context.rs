@@ -488,7 +488,12 @@ fn collect_similar_episodes(
 ) -> HiveResult<Vec<Episode>> {
     let use_text = !current_objective.is_empty();
     let mut filters = vec![ScalarFilter::eq("kind", "episode")];
-    filters.extend(config.filters.iter().map(|f| ScalarFilter::eq(&f.field, &f.value)));
+    filters.extend(
+        config
+            .filters
+            .iter()
+            .map(|f| ScalarFilter::eq(&f.field, &f.value)),
+    );
     let mut query = HybridQuery::default()
         .with_vector(config.vector.clone())
         .with_filters(filters)
