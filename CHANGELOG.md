@@ -5,6 +5,8 @@ la API puede cambiar entre versiones menores.
 
 ## Sin publicar
 
+## 0.7.1 — 2026-11-05
+
 ### Añadido
 - **La Colmena (simulador):** pestaña «3 · Relevo» en el Laboratorio y un paso nuevo en el tour. Un agente entrega un estado de seis campos (`saveTaskState`: hechos, callejones sin salida, plan), se indexa como episodio y el contexto nuevo arranca con `loadTaskState` + `buildAgentContext` con `episodicSimilarity`, mostrando cuánto ocupa el relevo frente a la memoria completa. API: `POST /api/handoff` y `POST /api/resume`.
 - **`embedQuery(text)`** (`embed_query` en Python; también en napi y en el núcleo): el vector de consulta de un
