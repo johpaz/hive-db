@@ -5,6 +5,8 @@ la API puede cambiar entre versiones menores.
 
 ## Sin publicar
 
+## 0.7.2 — 2026-11-05
+
 ## 0.7.1 — 2026-11-05
 
 ### Añadido
