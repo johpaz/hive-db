@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Union
 
 from . import _convert as c
 from . import _native
+from .task_state import (
+    TASK_STATE_COLLECTION,
+    StoredTaskState,
+    TaskStateInput,
+    normalize_task_state,
+    stored_task_state,
+    task_state_doc,
+    task_state_id,
+)
 from .types import (
     BatchOp,
     Decision,
@@ -230,6 +240,40 @@ class HiveDB:
     def working_keys(self, agent_id: str) -> List[str]:
         return self._native.working_keys(agent_id)
 
+    # -- estado de tarea ----------------------------------------------------------------------
+
+    def save_task_state(
+        self,
+        agent_id: str,
+        task_id: str,
+        state: TaskStateInput,
+        *,
+        expected_version: Optional[int] = None,
+    ) -> StoredTaskState:
+        """Guarda el estado de una tarea (objetivo, hechos, cambios, verificación, callejones sin
+        salida y plan) para que la siguiente instancia del agente continúe donde esta lo dejó.
+        Reemplaza el estado anterior de esa tarea. Es duradero (no caduca como la memoria de
+        trabajo) y no escribe en el registro de eventos. Con `expected_version` falla si otra
+        instancia guardó antes, en vez de pisarla (0 = no debe existir)."""
+        id = task_state_id(agent_id, task_id)
+        col = self.collection(TASK_STATE_COLLECTION)
+        previous = col.get(id)
+        step = (int(previous.doc.get("step", 0)) if previous else 0) + 1
+        doc = task_state_doc(
+            normalize_task_state(state), agent_id, task_id, step, int(time.time() * 1000)
+        )
+        version = col.put(id, doc, expected_version=expected_version)
+        return stored_task_state(doc, version)
+
+    def load_task_state(self, agent_id: str, task_id: str) -> Optional[StoredTaskState]:
+        """Lee el estado guardado de una tarea, o `None` si no hay."""
+        entry = self.collection(TASK_STATE_COLLECTION).get(task_state_id(agent_id, task_id))
+        return None if entry is None else stored_task_state(entry.doc, entry.version)
+
+    def delete_task_state(self, agent_id: str, task_id: str) -> bool:
+        """Borra el estado de una tarea. Devuelve `True` si existía."""
+        return self.collection(TASK_STATE_COLLECTION).delete(task_state_id(agent_id, task_id))
+
     # -- contexto y harness -------------------------------------------------------------------
 
     def causal_thread(self, stream_id: str, agents: Optional[Sequence[str]] = None) -> Any:
@@ -310,6 +354,10 @@ class HiveDB:
             if value is not None:
                 query[key] = value
         return [c.hit_out(h) for h in self._native.query_hybrid(query)]
+
+    def embed_query(self, text: str) -> Optional[list]:
+        """Vector de consulta de `text` con el embedder de la base (`None` si no tiene o el texto está vacío)."""
+        return self._native.embed_query(text)
 
     def trace_vector(
         self, vector: Sequence[float], k: int = 10, ef_search: Optional[int] = None

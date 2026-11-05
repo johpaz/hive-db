@@ -79,6 +79,44 @@ db.close();
 | Grafo de consentimiento / intent audit | proyección sobre el event log |
 | Suscripciones reactivas | push, no polling |
 
+## Estado de tarea
+
+Para un agente que reinicia su contexto con frecuencia, `saveTaskState` guarda lo que la siguiente
+instancia necesita para continuar: objetivo, hechos, cambios, verificación, callejones sin salida y plan.
+Es duradero y versionado; `expectedVersion` evita que dos instancias se pisen.
+
+```ts
+import { HiveDB, renderTaskState } from "@johpaz/hive-db";
+
+const saved = await db.saveTaskState("worker", "migracion", {
+  objective: "Migrar la facturación a Alegra",
+  facts: ["API base: https://api.alegra.com/v1"],
+  deadEnds: ["Basic auth falla con 401; usar token"],
+  plan: ["Mapear impuestos", "Probar nota crédito"],
+});
+
+// En el siguiente contexto: leer, actuar con un prompt corto, guardar.
+const state = (await db.loadTaskState("worker", "migracion"))!;
+const prompt = renderTaskState(state, { maxChars: 4000 }); // hechos y callejones primero
+await db.saveTaskState("worker", "migracion", { ...state, plan: state.plan.slice(1) }, {
+  expectedVersion: state.version,
+});
+```
+
+
+## Contexto corto y recuperación selectiva
+
+HiveDB cubre las piezas de «You don't need long context» (arXiv 2611.05306): contextos cortos que se
+reinician con un estado explícito y lectura selectiva en vez de volver a leerlo todo.
+
+- **Estado entre contextos:** `saveTaskState` / `loadTaskState` (arriba).
+- **Qué pasó:** `buildAgentContext` arma una ventana causal acotada en tokens a partir del event log.
+- **Trabajo parecido:** `embedQuery(text)` da el vector de consulta con el embedder de la base y
+  `strategy.episodicSimilarity` (con `filters` para acotar por inquilino) trae episodios previos.
+- **Historial:** búsqueda híbrida BM25 + vectores (`queryHybrid`) sobre lo ya compactado.
+
+Todo en una sola base local: sin servicio de vectores aparte ni llamadas externas para recuperar.
+
 ## Rendimiento
 
 Con 100.000 frases reales (384 dimensiones, disco NVMe): búsqueda vectorial ~1,4 ms (p50) con

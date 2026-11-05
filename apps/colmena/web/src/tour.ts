@@ -92,8 +92,17 @@ export const STEPS: TourStep[] = [
     },
   },
   {
+    title: "Contexto corto: el relevo",
+    body: "Un agente que reinicia su contexto no arrastra el historial: deja un estado de seis campos (objetivo, hechos, cambios, verificación, callejones sin salida y plan) con saveTaskState, y se indexa como episodio. La siguiente instancia arranca con loadTaskState y buildAgentContext, que además trae trabajo parecido (episodicSimilarity). Es la idea de «You don't need long context» (arXiv 2611.05306). Pruébalo en la pestaña «3 · Relevo» del Laboratorio.",
+    cam: [34, 20, 50],
+    target: [0, 0, 0],
+    run: async () => {
+      await api("/handoff", { body: { agent: "ada", objective: "consolidar lo aprendido" } });
+    },
+  },
+  {
     title: "Llévalo a tu proyecto",
-    body: "Lo que ves corre sobre HiveDB, un motor en Rust con binding para Node y Bun: instálalo con «bun add @johpaz/hive-db» y usa upsertDoc, queryHybrid, append y buildAgentContext. El código es abierto (Apache-2.0): github.com/johpaz/hive-db.",
+    body: "Lo que ves corre sobre HiveDB, un motor en Rust con binding para Node y Bun: instálalo con «bun add @johpaz/hive-db» y usa upsertDoc, queryHybrid, append, buildAgentContext y saveTaskState. El código es abierto (Apache-2.0): github.com/johpaz/hive-db.",
     cam: [34, 20, 50],
     target: [0, 0, 0],
   },

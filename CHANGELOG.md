@@ -5,6 +5,25 @@ la API puede cambiar entre versiones menores.
 
 ## Sin publicar
 
+### Añadido
+- **La Colmena (simulador):** pestaña «3 · Relevo» en el Laboratorio y un paso nuevo en el tour. Un agente entrega un estado de seis campos (`saveTaskState`: hechos, callejones sin salida, plan), se indexa como episodio y el contexto nuevo arranca con `loadTaskState` + `buildAgentContext` con `episodicSimilarity`, mostrando cuánto ocupa el relevo frente a la memoria completa. API: `POST /api/handoff` y `POST /api/resume`.
+- **`embedQuery(text)`** (`embed_query` en Python; también en napi y en el núcleo): el vector de consulta de un
+  texto con el embedder de la base, o `undefined`/`None` si no tiene embedder o el texto está vacío.
+- **`episodicSimilarity.filters`** en `buildAgentContext`: filtros de igualdad que se suman a `kind=episode`.
+  Antes los episodios se buscaban sin filtro de agente ni de inquilino, y en una base compartida filtraban
+  entre inquilinos; ahora el consumidor puede acotarlos (obligatorio al compartir base). En TS el vector se
+  envía como lista de números (un `Float32Array` se serializaba como objeto y el motor lo rechazaba).
+  Requiere recompilar el binario nativo.
+- **Estado de tarea** (`saveTaskState` / `loadTaskState` / `deleteTaskState`, y `save_task_state` /
+  `load_task_state` / `delete_task_state` en Python): el traspaso que un agente deja a su siguiente
+  instancia cuando reinicia su contexto con frecuencia. Seis campos —objetivo, hechos establecidos,
+  cambios aplicados, verificación, callejones sin salida y plan restante— tomados de «You don't need long
+  context» (arXiv 2611.05306). Es una colección duradera (no memoria de trabajo, que caduca) con versión
+  optimista: `expectedVersion` impide que una instancia pise el guardado de otra. `normalizeTaskState`
+  acota textos y listas, y `renderTaskState` lo convierte en texto para un prompt en orden de prioridad
+  (hechos y callejones sin salida se recortan los últimos). El documento es el mismo en Node y en Python.
+  Sin cambios en el núcleo Rust ni en el formato en disco.
+
 ## 0.7.0 — 2026-10-08
 
 ### Añadido

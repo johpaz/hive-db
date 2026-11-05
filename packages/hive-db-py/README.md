@@ -63,6 +63,27 @@ async with await AsyncHiveDB.open("./memoria", embedder="local") as db:
 Las llamadas sueltan el GIL mientras trabaja el motor: varios hilos (o tareas con `AsyncHiveDB`)
 consultan la misma base a la vez.
 
+### Estado de tarea
+
+El traspaso que un agente deja a su siguiente instancia: objetivo, hechos, cambios, verificación,
+callejones sin salida y plan. Es duradero y versionado, y el documento es el mismo que el del paquete npm.
+
+```python
+from hivedb import render_task_state
+
+db.save_task_state("worker", "migracion", {
+    "objective": "Migrar la facturación a Alegra",
+    "facts": ["API base: https://api.alegra.com/v1"],
+    "dead_ends": ["Basic auth falla con 401; usar token"],
+    "plan": ["Mapear impuestos", "Probar nota crédito"],
+})
+
+estado = db.load_task_state("worker", "migracion")
+prompt = render_task_state(estado, max_chars=4000)  # hechos y callejones primero
+db.save_task_state("worker", "migracion", {**vars(estado), "plan": estado.plan[1:]},
+                   expected_version=estado.version)  # no pisa a otra instancia
+```
+
 ### Errores
 
 Todos los errores del motor son `HiveDBError`; los semánticos llevan `code`

@@ -239,3 +239,20 @@ fn reabrir_con_otro_modelo_se_rechaza() {
         "{error}"
     );
 }
+
+#[test]
+fn embed_query_da_el_vector_de_consulta_del_embedder() {
+    let db = abrir(Arc::new(FakeEmbedder::default()));
+    let vector = db.embed_query("correo").unwrap().expect("hay embedder");
+    assert_eq!(vector.len(), DIM);
+    // Sinónimos del mismo grupo: el mismo vector, aunque no compartan ni una palabra.
+    assert_eq!(vector, db.embed_query("email").unwrap().unwrap());
+    // Texto vacío: nada que embeber.
+    assert!(db.embed_query("   ").unwrap().is_none());
+}
+
+#[test]
+fn embed_query_sin_embedder_devuelve_none() {
+    let db = HiveDB::open_temp().unwrap();
+    assert!(db.embed_query("correo").unwrap().is_none());
+}

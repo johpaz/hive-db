@@ -5,7 +5,7 @@
 
 # ---- 1) Binding nativo (Rust → .node) -------------------------------------
 FROM rust:1-bookworm AS native
-COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=oven/bun:1.4.4 /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -16,7 +16,7 @@ RUN bun install --frozen-lockfile || bun install
 RUN bun run build:native
 
 # ---- 2) Frontend (Vite) ---------------------------------------------------
-FROM oven/bun:1 AS web
+FROM oven/bun:1.4.4 AS web
 WORKDIR /app/web
 COPY apps/colmena/web/package.json apps/colmena/web/bun.lock* ./
 RUN bun install --frozen-lockfile || bun install
@@ -24,7 +24,7 @@ COPY apps/colmena/web ./
 RUN bun run build
 
 # ---- 3) Runtime -----------------------------------------------------------
-FROM oven/bun:1-slim
+FROM oven/bun:1.4.4-slim
 ENV NODE_ENV=production \
     PORT=3001 \
     WEB_DIR=/app/apps/colmena/web/dist \

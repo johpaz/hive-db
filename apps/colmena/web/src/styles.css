@@ -116,3 +116,5 @@ button.mini { align-self: flex-start; padding: 2px 8px; font-size: 11px; backgro
 
 .title h1 { display: flex; align-items: center; gap: 12px; }
 .logo { border-radius: 8px; box-shadow: 0 0 18px rgba(255, 176, 32, 0.35); }
+
+.relay { white-space: pre-wrap; background: rgba(255,255,255,.04); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: 12px; max-height: 220px; overflow: auto; }

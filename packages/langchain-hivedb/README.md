@@ -62,6 +62,49 @@ history = HiveDBChatMessageHistory(db, session_id="ana")
 history.add_user_message("hola")
 ```
 
+## Una acción por contexto — estado de tarea
+
+Si el agente reinicia su contexto en cada paso, el grafo no necesita acumular mensajes: el estado de la
+tarea (objetivo, hechos, callejones sin salida, plan…) vive en HiveDB y cada nodo lo lee, hace **una**
+acción con un prompt corto y lo vuelve a escribir. Con `expected_version`, otra instancia no se pisa en
+silencio. (Requiere la versión de `johpaz-hive-db` que incluye `save_task_state`.)
+
+```python
+from typing import TypedDict
+from hivedb import HiveDB, render_task_state
+from langgraph.graph import END, START, StateGraph
+
+db = HiveDB.open("./memoria")
+AGENTE, TAREA = "worker", "migracion"
+db.save_task_state(AGENTE, TAREA, {"objective": "Migrar la facturación", "plan": ["leer API", "mapear", "probar"]})
+
+
+class Estado(TypedDict):
+    hecho: bool  # el grafo casi no lleva nada: la memoria vive en HiveDB
+
+
+def paso(_: Estado) -> Estado:
+    estado = db.load_task_state(AGENTE, TAREA)                 # 1. leer el estado
+    if not estado.plan:
+        return {"hecho": True}
+    siguiente, *resto = estado.plan
+    # 2. una acción; el modelo recibe solo render_task_state(estado), no un historial
+    resultado = hacer(siguiente, contexto=render_task_state(estado))
+    db.save_task_state(                                        # 3. escribir el estado nuevo
+        AGENTE, TAREA,
+        {**vars(estado), "changes": estado.changes + [resultado], "plan": resto},
+        expected_version=estado.version,
+    )
+    return {"hecho": not resto}
+
+
+g = StateGraph(Estado)
+g.add_node("paso", paso)
+g.add_edge(START, "paso")
+g.add_conditional_edges("paso", lambda s: END if s["hecho"] else "paso")
+g.compile().invoke({"hecho": False})
+```
+
 ## Varios adaptadores en una misma base
 
 Cada adaptador separa lo suyo con un ámbito (`collection_name`), así que `HiveDBStore`,

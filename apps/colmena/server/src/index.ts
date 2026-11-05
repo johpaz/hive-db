@@ -144,6 +144,24 @@ const app = new Elysia()
               .post("/api/speed", ({ session, body }) => ((session!.sim.speed = body.speed), { speed: body.speed }), {
                 body: t.Object({ speed: t.Number({ minimum: 0.1, maximum: 10 }) }),
               })
+              .post(
+                "/api/handoff",
+                async ({ session, body, set }) => {
+                  try {
+                    return await session!.colmena.handoff(body.agent, body.objective);
+                  } catch (e) {
+                    return fail(set, 409, e instanceof Error ? e.message : String(e));
+                  }
+                },
+                { body: t.Object({ agent: t.String({ maxLength: 40 }), objective: t.String({ minLength: 1, maxLength: 200 }) }) },
+              )
+              .post(
+                "/api/resume",
+                async ({ session, body, set }) =>
+                  (await session!.colmena.resume(body.agent, body.objective)) ??
+                  fail(set, 404, "Ese agente aún no entregó un relevo: pulsa «Entregar relevo» primero"),
+                { body: t.Object({ agent: t.String({ maxLength: 40 }), objective: t.String({ minLength: 1, maxLength: 200 }) }) },
+              )
               .get("/api/context/:agent", ({ session, params }) => session!.colmena.context(params.agent, "demo")),
         ),
   )

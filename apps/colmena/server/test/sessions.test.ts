@@ -57,4 +57,42 @@ describe("RateLimiter", () => {
     await Bun.sleep(70);
     expect(r.allow("ip1")).toBe(true);
   });
+
+  it("el relevo entre contextos conserva hechos y callejones sin salida, y trae episodios parecidos", async () => {
+    mgr = new SessionManager({ ...limits, seedDocs: 0 });
+    const s = await mgr.create();
+    const c = s.colmena;
+    await c.remember("ada", "El despliegue usa el puerto 8443 en producción");
+    const malo = await c.remember("ada", "Probar rsync al servidor viejo");
+    await c.invalidate(malo.id);
+
+    expect(await c.resume("ada", "desplegar")).toBeUndefined(); // sin relevo todavía
+
+    const relay = await c.handoff("ada", "desplegar la aplicación en producción");
+    expect(relay.state.facts).toEqual(["El despliegue usa el puerto 8443 en producción"]);
+    expect(relay.state.deadEnds).toEqual(["Olvidado: Probar rsync al servidor viejo"]);
+    expect(relay.rendered).toContain("8443");
+    expect(relay.state.step).toBe(1);
+
+    // Segunda entrega: sube el paso y el episodio anterior aparece como trabajo parecido.
+    await c.remember("ada", "El puerto 8443 requiere el certificado nuevo");
+    const second = await c.handoff("ada", "desplegar la aplicación en producción");
+    expect(second.state.step).toBe(2);
+    const resumed = await c.resume("ada", "desplegar la aplicación en producción");
+    expect(resumed!.state.facts).toHaveLength(2);
+    expect(resumed!.episodes.map((e) => e.id)).toContain("ep:ada:1");
+    expect(resumed!.episodes.map((e) => e.id)).not.toContain("ep:ada:2"); // el propio estado actual no cuenta
+  });
+
+  it("el relevo de un agente no trae episodios de otro", async () => {
+    mgr = new SessionManager({ ...limits, seedDocs: 0 });
+    const c = (await mgr.create()).colmena;
+    await c.remember("ada", "El puerto 8443 requiere el certificado nuevo");
+    await c.handoff("ada", "desplegar en producción");
+    await c.remember("lin", "Desplegar en producción exige el puerto 8443");
+    await c.handoff("lin", "desplegar en producción");
+    await c.handoff("lin", "desplegar en producción");
+    const resumed = await c.resume("lin", "desplegar en producción");
+    expect(resumed!.episodes.every((e) => e.id.startsWith("ep:lin:"))).toBe(true);
+  });
 });

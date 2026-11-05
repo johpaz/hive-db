@@ -10,9 +10,18 @@ const MODES: { id: Mode; label: string; hint: string }[] = [
 ];
 const SAMPLE = ["Mi vuelo a Lisboa sale el viernes a las 7:40", "El cliente prefiere facturas en euros", "Bug en el parser de fechas: usar UTC"].join("\n");
 
+interface Relay {
+  state: { objective: string; facts: string[]; deadEnds: string[]; plan: string[]; step: number };
+  rendered: string;
+  fullChars: number;
+  relayChars: number;
+  items?: { type: string; text: string }[];
+  episodes?: { id: string; text: string }[];
+}
+
 export function Lab() {
   const { lab, setLab, agents, lastQuery, docs, docIndex, running, stats } = useStore();
-  const [tab, setTab] = useState<"remember" | "query">("remember");
+  const [tab, setTab] = useState<"remember" | "query" | "relay">("remember");
   const [agent, setAgent] = useState("tú");
   const [lines, setLines] = useState("");
   const [text, setText] = useState("");
@@ -22,6 +31,8 @@ export function Lab() {
   const [ef, setEf] = useState(200);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [objective, setObjective] = useState("");
+  const [relay, setRelay] = useState<{ kind: "handoff" | "resume"; data: Relay } | null>(null);
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -48,6 +59,18 @@ export function Lab() {
     run(async () => {
       if (!text.trim()) return;
       await api("/query", { body: { text, agent: "tú", k, mode, efSearch: ef, only: only || undefined } });
+    });
+
+  const handoff = () =>
+    run(async () => {
+      if (!objective.trim()) return;
+      setRelay({ kind: "handoff", data: await api<Relay>("/handoff", { body: { agent, objective } }) });
+    });
+
+  const resume = () =>
+    run(async () => {
+      if (!objective.trim()) return;
+      setRelay({ kind: "resume", data: await api<Relay>("/resume", { body: { agent, objective } }) });
     });
 
   const reset = (empty: boolean) => run(async () => void (await api("/reset", { body: { empty } })));
@@ -79,9 +102,74 @@ export function Lab() {
       <div className="tabs">
         <button className={tab === "remember" ? "on" : ""} onClick={() => setTab("remember")}>1 · Memorizar</button>
         <button className={tab === "query" ? "on" : ""} onClick={() => setTab("query")}>2 · Consultar</button>
+        <button className={tab === "relay" ? "on" : ""} onClick={() => setTab("relay")}>3 · Relevo</button>
       </div>
 
-      {tab === "remember" ? (
+      {tab === "relay" ? (
+        <div className="form">
+          <p className="muted">
+            Un agente que reinicia su contexto con frecuencia no arrastra el historial: deja un <b>estado de seis campos</b> y la
+            siguiente instancia arranca de ahí (idea de «You don't need long context», arXiv 2611.05306).
+          </p>
+          <label>
+            Agente
+            <select value={agent} onChange={(e) => setAgent(e.target.value)}>
+              <option value="tú">tú</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>{a.id}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Objetivo de la tarea
+            <input value={objective} onChange={(e) => setObjective(e.target.value)} placeholder="p. ej. reservar el vuelo a Lisboa" />
+          </label>
+          <div className="row">
+            <button disabled={busy || !objective.trim()} onClick={handoff}>Entregar relevo</button>
+            <button className="ghost" disabled={busy || !objective.trim()} onClick={resume}>Arrancar contexto nuevo</button>
+          </div>
+          <p className="muted">
+            Entregar: guarda hechos (lo vivo), callejones sin salida (lo olvidado) y el plan con <code>saveTaskState</code>, y lo indexa como
+            episodio. Arrancar: lee <code>loadTaskState</code> y pide <code>buildAgentContext</code> con <code>episodicSimilarity</code>.
+          </p>
+          {relay && (
+            <div className="out">
+              <h3>
+                {relay.kind === "handoff" ? "Relevo entregado" : "Contexto nuevo"} · paso {relay.data.state.step}
+              </h3>
+              <p className="muted">
+                El relevo ocupa {relay.data.relayChars} caracteres frente a {relay.data.fullChars} de memoria del agente
+                {relay.data.fullChars > 0 && ` (${Math.round((100 * relay.data.relayChars) / relay.data.fullChars)} %)`}.
+              </p>
+              <pre className="relay">{relay.data.rendered}</pre>
+              {relay.kind === "resume" && (
+                <>
+                  <h3>Episodios parecidos · {relay.data.episodes?.length ?? 0}</h3>
+                  <ol>
+                    {(relay.data.episodes ?? []).map((e) => (
+                      <li key={e.id}>
+                        <small>{e.id}</small>
+                        <span>{e.text}</span>
+                      </li>
+                    ))}
+                  </ol>
+                  {(relay.data.episodes ?? []).length === 0 && <p className="muted">Aún no hay trabajo parecido: entrega un relevo más y vuelve a arrancar.</p>}
+                  {(relay.data.items ?? []).length > 0 && (
+                    <>
+                      <h3>Hilo causal</h3>
+                      <ul>
+                        {relay.data.items!.slice(0, 6).map((i, n) => (
+                          <li key={n}><small>{i.type}</small> {i.text}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      ) : tab === "remember" ? (
         <div className="form">
           <label>
             Un recuerdo por línea (máx. 10)

@@ -4,6 +4,15 @@ Visualización 3D en vivo de HiveDB. Cada visitante recibe **su propia base** (`
 agentes simulados que escriben, consultan, corrigen y piden permisos; cada operación real del motor se anima
 en una escena Three.js.
 
+## Qué muestra
+
+Recuerdos (`upsertDoc`), búsqueda híbrida BM25 + HNSW (`queryHybrid`, `traceVector`), el log de eventos y la
+invalidación, y los permisos entre agentes. La pestaña **3 · Relevo** del Laboratorio enseña el contexto corto de
+«You don't need long context» (arXiv 2611.05306): un agente entrega un estado de seis campos (`saveTaskState`:
+hechos, callejones sin salida —lo olvidado—, plan…), se indexa como episodio y el contexto nuevo arranca con
+`loadTaskState` + `buildAgentContext` con `episodicSimilarity`, sin arrastrar el historial. API: `POST /api/handoff`
+y `POST /api/resume`.
+
 ## Desarrollo
 
 ```bash

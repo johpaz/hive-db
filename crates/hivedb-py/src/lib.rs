@@ -231,6 +231,11 @@ impl Database {
         to_py(py, &hits)
     }
 
+    fn embed_query<'py>(&self, py: Python<'py>, text: String) -> PyResult<Bound<'py, PyAny>> {
+        let vector = run(py, || self.inner.embed_query(&text))?;
+        to_py(py, &vector)
+    }
+
     #[pyo3(signature = (vector, k, ef_search=None))]
     fn trace_vector<'py>(
         &self,

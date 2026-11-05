@@ -781,6 +781,11 @@ impl Handle {
         self.with_db(|db| Ok(db.working_get(agent_id, key)))
     }
 
+    /// Vector de consulta de `text` con el embedder de la base; `None` si no tiene embedder.
+    pub fn embed_query(&self, text: &str) -> Result<Option<Vec<f32>>> {
+        self.with_db(|db| db.embed_query(text).map_err(err))
+    }
+
     pub fn working_keys(&self, agent_id: &str) -> Result<Vec<String>> {
         self.with_db(|db| Ok(db.working_keys(agent_id)))
     }

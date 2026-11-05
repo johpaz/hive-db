@@ -234,3 +234,7 @@ grandes conviene aportar los vectores.
 - Repetir en otras máquinas y sistemas operativos (Windows y macOS sin ejercitar).
 - Más de 100.000 documentos y clientes concurrentes.
 - Medir Mem0, Zep y Letta con una tarea comparable de extremo a extremo (no se miden por latencia).
+- Evaluar de extremo a extremo la primitiva de estado de tarea (`saveTaskState`/`loadTaskState`) y el modo de
+  una acción por contexto que la usa. Los bancos están en `hive-sdk/bench/compaction` y
+  `hive-sdk/bench/single-action`; este documento no recoge sus cifras hasta que haya una corrida válida con un
+  modelo real (las anteriores se interrumpieron por cuota y credenciales, y no cuentan).

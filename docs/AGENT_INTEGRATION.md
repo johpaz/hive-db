@@ -49,7 +49,7 @@ Derivado de leer directamente `causal/mod.rs`, `state/causal_thread.rs`, `contex
 | `ToolCall { tool }` + `payload.outcome` | **MUST** ser `"Ok"` \| `"Timeout"` \| `{"Err": "<mensaje>"}` | cualquier otro shape (incluyendo strings sueltos como `"ok"`/`"error"`) cae en el default `Ok` — un fallo real se pierde en silencio, tanto para `toolStats().errors` como para la detección de `ErrorLoop`/`rootCause`. Ver `SPEC.md` §2.2. |
 | `ToolCall.payload.latency_ms` / `.cost` | SHOULD | sin esto, `toolStats()` sigue contando invocaciones/errores pero `totalLatencyMs`/`totalCost` quedan en 0. |
 | `IntentLogged { actor, intent, authorized_by }` | **MUST** si se quiere `ObjectiveDrift` o anclaje del objetivo actual en `buildAgentContext` | sin un `IntentLogged` inicial en el stream, `detect_objective_drift` no tiene contra qué comparar y nunca dispara; `buildAgentContext` no puede ubicar la decisión "actual" por texto de objetivo si no hay decisiones que la mencionen. |
-| Documentos de episodio indexados con `upsertDoc`/`queryHybrid`, campo escalar `kind = "episode"` | **MUST** si se usa `episodicSimilarity` en `ContextStrategy` | hoy este filtro está *hardcodeado* en `context.rs` (`collect_similar_episodes`) y no está documentado en ningún otro lado — sin ese campo, la estrategia de similaridad episódica devuelve siempre una lista vacía, sin error. |
+| Documentos de episodio indexados con `upsertDoc`/`queryHybrid`, campo escalar `kind = "episode"` | **MUST** si se usa `episodicSimilarity` en `ContextStrategy` | el filtro `kind=episode` está fijo en `context.rs` (`collect_similar_episodes`); sin ese campo la estrategia devuelve una lista vacía, sin error. `EpisodicConfig.filters` suma filtros de igualdad (p. ej. el inquilino): **obligatorio en una base compartida**, porque sin él se recorren los episodios de todos. El motor devuelve solo el id del episodio (`summary` es «Episode <id>»): el consumidor resuelve el texto desde su propia colección. |
 | `LearningProposal` (evento, sin payload propio requerido) | MAY | es solo un canal de auditoría — si el consumidor decide persistir las proposals que devuelve `evaluateHarness()`, este es el `EventKind` a usar. El harness nunca relee estos eventos; no hay side effects automáticos. |
 
 Todo lo demás (`Fact`, `MemoryWrite`, `ConsentGranted`, etc.) es ortogonal a G9 — el harness los
@@ -119,6 +119,46 @@ Este mismo escenario (con roles `Analyst`/`Router`/`Auditor`, streams `ticket-*`
 `packages/hive-db/test/generic_consumer.test.ts` — sirven como referencia ejecutable de este
 contrato y protegen contra que futuras features del harness vuelvan a asumir implícitamente el
 vocabulario de hiveCode.
+
+## 4b. Estado de tarea entre contextos (opcional, fuera de G9)
+
+Un runtime que reinicia su contexto con frecuencia —compactación, o una sola acción por contexto— necesita un
+estado corto y explícito que viaje entre instancias. `saveTaskState`/`loadTaskState` lo guardan en la colección
+`task_states` (id `<agentId>:<taskId>`, con cada parte codificada): objetivo, hechos establecidos, cambios
+aplicados, verificación, callejones sin salida y plan restante, los seis campos de «You don't need long
+context» (arXiv 2611.05306).
+
+- **No es G9:** no escribe en el registro de eventos ni lo lee el harness. `causalThread`/`buildAgentContext`
+  reconstruyen *qué pasó*; el estado de tarea es *qué sabe la siguiente instancia*. Se complementan.
+- **Duradero, no memoria de trabajo:** `workingSet` caduca por TTL; un estado de tarea debe sobrevivir a un reinicio.
+- **Concurrencia:** `expectedVersion` (0 = no debe existir) falla si otra instancia guardó antes.
+- **Prioridad al recortar:** `renderTaskState(state, { maxChars })` pone hechos y callejones sin salida antes que
+  cambios y verificación, así que un recorte de cola pierde lo menos valioso.
+- **Lo que lo hace útil:** guardar el historial completo (índice de mensajes) además del estado, para recuperar
+  por búsqueda lo que el estado no conserva. La compactación pierde información por diseño.
+
+Ejemplo con LangGraph en `packages/langchain-hivedb/README.md`.
+
+### Similitud episódica con embeddings propios del motor
+
+`embedQuery(text)` (`embed_query` en Python) devuelve el vector de consulta con el embedder de la base
+(`HiveDB.open(path, { embedder: "local" })`), en el mismo espacio que los documentos. Con él, `episodicSimilarity`
+no necesita un servicio de embeddings aparte: el mismo motor indexa los episodios, vectoriza la consulta y fusiona
+BM25 y vectores. Devuelve `undefined`/`None` sin embedder o con texto vacío.
+
+```typescript
+const vector = await db.embedQuery(objective);
+const ctx = await db.buildAgentContext({
+  taskId, currentPhase, currentObjective: objective, maxTokens,
+  strategy: {
+    causalAnchors: true,
+    episodicSimilarity: vector && { vector, k: 3, filters: [{ field: "tenant", value: tenantId }] },
+  },
+});
+```
+
+Es la pieza de recuperación selectiva de «You don't need long context» (arXiv 2611.05306) que completa el estado de
+tarea de arriba: el estado dice *qué sabe la siguiente instancia*; los episodios traen *trabajo parecido* ya hecho.
 
 ## 5. Versionado del contrato
 

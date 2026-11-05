@@ -11,6 +11,7 @@ from ._native import ERROR_CODES, HiveDBError
 from .aio import AsyncCollection, AsyncEventStream, AsyncHiveDB
 from .database import Collection, EventStream, HiveDB
 from .errors import error_code
+from .task_state import StoredTaskState, TaskState, normalize_task_state, render_task_state
 from .types import (
     BatchOp,
     Decision,
@@ -57,9 +58,13 @@ __all__ = [
     "PreparedEmbedder",
     "ScalarFilter",
     "ScanOptions",
+    "StoredTaskState",
+    "TaskState",
     "ToolStats",
     "TraceStep",
     "VectorOptions",
     "VectorTrace",
     "error_code",
+    "normalize_task_state",
+    "render_task_state",
 ]

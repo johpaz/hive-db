@@ -1,4 +1,22 @@
 import { createRequire } from "node:module";
+import {
+  TASK_STATE_COLLECTION,
+  normalizeTaskState,
+  taskStateId,
+  type SaveTaskStateOptions,
+  type StoredTaskState,
+  type TaskState,
+  type TaskStateDoc,
+} from "./task-state.js";
+
+export {
+  normalizeTaskState,
+  renderTaskState,
+  type RenderTaskStateOptions,
+  type SaveTaskStateOptions,
+  type StoredTaskState,
+  type TaskState,
+} from "./task-state.js";
 
 const require = createRequire(import.meta.url);
 const { JsHiveDb, prepareEmbedder: nativePrepareEmbedder } = require("../native.cjs") as {
@@ -75,6 +93,7 @@ interface JsHiveDbInner {
   workingSet(agentId: string, key: string, json: string, ttlMs?: number): Promise<void>;
   workingGet(agentId: string, key: string): Promise<string | undefined>;
   workingKeys(agentId: string): Promise<string[]>;
+  embedQuery(text: string): Promise<Float32Array | null | undefined>;
   subscribe(
     pattern: JsEventPattern,
     callback: (err: Error | null, event: JsEvent) => void
@@ -255,6 +274,11 @@ export interface ContextStrategy {
 export interface EpisodicConfig {
   vector: Float32Array;
   k: number;
+  /**
+   * Filtros de igualdad que se suman a `kind=episode`. En una base compartida entre inquilinos
+   * debe llevar el del inquilino: sin él se recorren los episodios de todos.
+   */
+  filters?: Array<{ field: string; value: string }>;
 }
 
 export interface AnomalyConfig {
@@ -622,7 +646,18 @@ export class HiveDB {
 
   /** Build an adaptive, token-bounded context window for an agent. */
   async buildAgentContext(req: AgentContextRequest): Promise<unknown> {
-    return JSON.parse(await this.inner.buildAgentContext(JSON.stringify(req)));
+    // Un Float32Array no se serializa como lista en JSON: el motor espera un arreglo de números.
+    const vector = req.strategy.episodicSimilarity?.vector;
+    const wire = vector
+      ? {
+          ...req,
+          strategy: {
+            ...req.strategy,
+            episodicSimilarity: { ...req.strategy.episodicSimilarity, vector: Array.from(vector) },
+          },
+        }
+      : req;
+    return JSON.parse(await this.inner.buildAgentContext(JSON.stringify(wire)));
   }
 
   /** Evaluate a task with the harness loop. */
@@ -642,9 +677,62 @@ export class HiveDB {
     return JSON.parse(json) as T;
   }
 
+  /**
+   * Vector de consulta de `text` con el embedder de la base, para `strategy.episodicSimilarity`
+   * de `buildAgentContext`. `undefined` si la base no se abrió con `embedder` o el texto está vacío.
+   */
+  async embedQuery(text: string): Promise<Float32Array | undefined> {
+    return (await this.inner.embedQuery(text)) ?? undefined;
+  }
+
   /** Return all non-expired keys for an agent. */
   async workingKeys(agentId: string): Promise<string[]> {
     return this.inner.workingKeys(agentId);
+  }
+
+  /**
+   * Guarda el estado de una tarea (objetivo, hechos, cambios, verificación,
+   * callejones sin salida y plan) para que la siguiente instancia del agente
+   * continúe donde esta lo dejó. Reemplaza el estado anterior de esa tarea.
+   * Es duradero (no caduca como la memoria de trabajo) y no escribe en el
+   * registro de eventos. Con `expectedVersion` falla si otra instancia guardó
+   * antes, en vez de pisarla.
+   */
+  async saveTaskState(
+    agentId: string,
+    taskId: string,
+    state: Partial<TaskState>,
+    options?: SaveTaskStateOptions
+  ): Promise<StoredTaskState> {
+    const id = taskStateId(agentId, taskId);
+    const col = this.collection<TaskStateDoc>(TASK_STATE_COLLECTION);
+    const previous = await col.get(id);
+    const doc: TaskStateDoc = {
+      ...normalizeTaskState(state),
+      agentId,
+      taskId,
+      step: (previous?.doc.step ?? 0) + 1,
+      updatedAt: Date.now(),
+    };
+    const version = await col.put(
+      id,
+      doc,
+      options?.expectedVersion === undefined ? undefined : { expectedVersion: options.expectedVersion }
+    );
+    return { ...doc, version };
+  }
+
+  /** Lee el estado guardado de una tarea; `undefined` si no hay. */
+  async loadTaskState(agentId: string, taskId: string): Promise<StoredTaskState | undefined> {
+    const entry = await this.collection<TaskStateDoc>(TASK_STATE_COLLECTION).get(
+      taskStateId(agentId, taskId)
+    );
+    return entry ? { ...entry.doc, version: entry.version } : undefined;
+  }
+
+  /** Borra el estado de una tarea. Devuelve `true` si existía. */
+  async deleteTaskState(agentId: string, taskId: string): Promise<boolean> {
+    return this.collection<TaskStateDoc>(TASK_STATE_COLLECTION).delete(taskStateId(agentId, taskId));
   }
 
   /** @deprecated Use {@link upsertDoc}; `text` maps to the `body` field. */

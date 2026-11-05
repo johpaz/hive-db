@@ -7,6 +7,7 @@ import asyncio
 from typing import Any, AsyncIterator, Callable, Iterable, List, Mapping, Optional, Sequence, Union
 
 from .database import Collection, EventStream, HiveDB, PatternInput
+from .task_state import StoredTaskState, TaskStateInput
 from .types import (
     BatchOp,
     Decision,
@@ -179,6 +180,24 @@ class AsyncHiveDB:
     async def working_keys(self, agent_id: str) -> List[str]:
         return await asyncio.to_thread(self._inner.working_keys, agent_id)
 
+    async def save_task_state(
+        self,
+        agent_id: str,
+        task_id: str,
+        state: TaskStateInput,
+        *,
+        expected_version: Optional[int] = None,
+    ) -> StoredTaskState:
+        return await asyncio.to_thread(
+            self._inner.save_task_state, agent_id, task_id, state, expected_version=expected_version
+        )
+
+    async def load_task_state(self, agent_id: str, task_id: str) -> Optional[StoredTaskState]:
+        return await asyncio.to_thread(self._inner.load_task_state, agent_id, task_id)
+
+    async def delete_task_state(self, agent_id: str, task_id: str) -> bool:
+        return await asyncio.to_thread(self._inner.delete_task_state, agent_id, task_id)
+
     async def causal_thread(self, stream_id: str, agents: Optional[Sequence[str]] = None) -> Any:
         return await asyncio.to_thread(self._inner.causal_thread, stream_id, agents)
 
@@ -241,6 +260,9 @@ class AsyncHiveDB:
             boosts=boosts,
             ef_search=ef_search,
         )
+
+    async def embed_query(self, text: str) -> Optional[list]:
+        return await asyncio.to_thread(self._inner.embed_query, text)
 
     async def trace_vector(
         self, vector: Sequence[float], k: int = 10, ef_search: Optional[int] = None

@@ -221,6 +221,7 @@ fn episodic_similarity_retrieves_past_relevant_episodes() {
                 episodic_similarity: Some(hivedb_core::EpisodicConfig {
                     vector: embed("null pointer pagos"),
                     k: 3,
+                    filters: Vec::new(),
                 }),
                 ..Default::default()
             },
@@ -298,4 +299,52 @@ fn build_context_is_idempotent() {
     let ctx2 = db.build_agent_context(req.clone()).unwrap();
 
     assert_eq!(ctx1.content_hash(), ctx2.content_hash());
+}
+
+#[test]
+fn episodic_similarity_respects_extra_filters_so_tenants_do_not_mix() {
+    let db = vector_db();
+    for (id, tenant) in [("ep-a", "acme"), ("ep-b", "globex")] {
+        db.upsert_doc(
+            &hivedb_core::IndexDoc::new(id)
+                .with_body("null pointer en módulo de pagos")
+                .with_vector(embed("null pointer pagos"))
+                .with_filters(vec![
+                    hivedb_core::ScalarFilter::eq("kind", "episode"),
+                    hivedb_core::ScalarFilter::eq("tenant", tenant),
+                ]),
+        )
+        .unwrap();
+    }
+
+    let ask = |filters: Vec<hivedb_core::EpisodicFilter>| {
+        db.build_agent_context(AgentContextRequest {
+            agents: Vec::new(),
+            task_id: "task-current".into(),
+            current_phase: "".into(),
+            current_objective: "NPE en validación de pagos".into(),
+            max_tokens: 8192,
+            strategy: ContextStrategy {
+                episodic_similarity: Some(hivedb_core::EpisodicConfig {
+                    vector: embed("null pointer pagos"),
+                    k: 5,
+                    filters,
+                }),
+                ..Default::default()
+            },
+        })
+        .unwrap()
+        .similar_episodes
+        .into_iter()
+        .map(|e| e.task_id)
+        .collect::<Vec<_>>()
+    };
+
+    let acme = ask(vec![hivedb_core::EpisodicFilter {
+        field: "tenant".into(),
+        value: "acme".into(),
+    }]);
+    assert_eq!(acme, ["ep-a"]);
+    // Sin filtro (comportamiento histórico) se ven los dos: por eso el filtro es obligatorio al compartir base.
+    assert_eq!(ask(Vec::new()).len(), 2);
 }

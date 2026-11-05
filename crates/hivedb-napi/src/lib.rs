@@ -494,6 +494,13 @@ impl JsHiveDB {
         Ok(value.map(|v| v.to_string()))
     }
 
+    /// Vector de consulta de un texto con el embedder de la base (`undefined` si no tiene).
+    #[napi(js_name = "embedQuery")]
+    pub async fn embed_query(&self, text: String) -> Result<Option<Float32Array>> {
+        let vector = self.inner.embed_query(&text).map_err(js_err)?;
+        Ok(vector.map(Float32Array::new))
+    }
+
     /// Return all non-expired keys for an agent.
     #[napi(js_name = "workingKeys")]
     pub async fn working_keys(&self, agent_id: String) -> Result<Vec<String>> {

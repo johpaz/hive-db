@@ -554,6 +554,19 @@ impl HiveDB {
         semantic.query_hybrid(query).map_err(Into::into)
     }
 
+    /// Vector de consulta de un texto, en el mismo espacio que los documentos. Sirve para pasar
+    /// `episodicSimilarity` a `build_agent_context`. Devuelve `None` si la base no tiene
+    /// `embedder` (los vectores los aporta quien llama) o el texto está vacío.
+    pub fn embed_query(&self, text: &str) -> HiveResult<Option<Vec<f32>>> {
+        let Some(embedder) = self.embedder.as_ref() else {
+            return Ok(None);
+        };
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(embedder.embed(&[text], EmbedKind::Query)?.pop())
+    }
+
     /// Búsqueda vectorial (sin filtros) que devuelve además la ruta que
     /// recorrió el HNSW. Herramienta de diagnóstico y visualización; la ruta
     /// normal de `query_hybrid` no registra nada.

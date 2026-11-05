@@ -145,7 +145,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
 
       - name: Install dependencies
         working-directory: packages/hive-db
@@ -187,7 +187,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -282,7 +282,7 @@ jobs:
         if: ${{ !matrix.alpine }}
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
 
       - name: Install dependencies
         if: ${{ !matrix.alpine }}
@@ -313,7 +313,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/w" -w /w/packages/hive-db \
             -e HIVEDB_MODEL_DIR=/w/.model-cache -e HIVEDB_E2E_EMBEDDER=1 \
-            oven/bun:1.4.2-alpine sh -c '
+            oven/bun:1.4.4-alpine sh -c '
               bun install --frozen-lockfile &&
               for attempt in 1 2; do
                 bun -e "import { HiveDB } from \"./src/index.ts\"; console.log(JSON.stringify(await HiveDB.prepareEmbedder()));" && break
@@ -609,7 +609,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
 
       - name: Setup Node
         uses: actions/setup-node@v4

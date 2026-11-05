@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HiveDB } from "@johpaz/hive-db";
+import { HiveDB, renderTaskState, type StoredTaskState } from "@johpaz/hive-db";
 import { AGENTS, TOPICS, makeFact, pick, rng, type AgentSpec } from "./dataset";
 import { DIM, embed, tokenize, topicOf } from "./embed";
 import { Pca3 } from "./pca";
@@ -33,6 +33,23 @@ export interface TraceStepRec {
   to: XYZ;
   id: string;
   distance: number;
+}
+
+/** Lo que ve el laboratorio del relevo entre contextos. */
+export interface RelayView {
+  state: StoredTaskState;
+  /** El estado como lo recibiría el modelo en su prompt. */
+  rendered: string;
+  /** Caracteres del historial completo que el relevo reemplaza, y del relevo. */
+  fullChars: number;
+  relayChars: number;
+}
+
+export interface ResumeView extends RelayView {
+  /** Decisiones y llamadas del hilo causal que `buildAgentContext` trajo a la ventana. */
+  items: { type: string; text: string }[];
+  /** Episodios de trabajo parecido (`episodicSimilarity`), ya con su texto. */
+  episodes: { id: string; text: string }[];
 }
 
 export type Msg =
@@ -298,6 +315,86 @@ export class Colmena {
       strategy: { causalAnchors: true },
       agents: [agent],
     });
+  }
+
+  /**
+   * Cierra un contexto: destila lo que sabe `agent` en un estado de seis campos (como pide «You don't need
+   * long context», arXiv 2611.05306), lo guarda con `saveTaskState` y lo indexa como episodio para que
+   * otra tarea parecida lo encuentre. Sin modelo: lo vivo son los hechos, lo olvidado son los callejones
+   * sin salida. La siguiente instancia arranca de este estado y no del historial.
+   */
+  async handoff(agent: string, objective: string): Promise<RelayView> {
+    const mine = [...this.docs.values()].filter((d) => d.agent === agent).sort((a, b) => a.seq - b.seq);
+    const alive = mine.filter((d) => d.alive);
+    const dropped = mine.filter((d) => !d.alive);
+    const taskId = `task-${agent}`;
+    const previous = await this.db.loadTaskState(agent, taskId);
+    const state = await this.db.saveTaskState(
+      agent,
+      taskId,
+      {
+        objective,
+        facts: alive.slice(-8).map((d) => d.text),
+        changes: [`${alive.length} recuerdo(s) vivos en la memoria de ${agent}`],
+        verification: [`${this.eventCount} evento(s) en el log de la sesión`],
+        deadEnds: dropped.slice(-5).map((d) => `Olvidado: ${d.text}`),
+        plan: ["Continuar desde los hechos de arriba sin repetir lo olvidado"],
+      },
+      previous ? { expectedVersion: previous.version } : { expectedVersion: 0 },
+    );
+    const body = `${objective}. ${state.facts.join(" ")}`;
+    const epId = `ep:${agent}:${state.step}`;
+    await this.db.upsertDoc({
+      id: epId,
+      body,
+      vector: embed(body),
+      filters: [
+        { field: "kind", value: "episode" },
+        { field: "agent", value: agent },
+      ],
+    });
+    this.episodes.set(epId, body);
+    await this.logEvent(agent, "ToolCall", { tool: "task_state.save", step: state.step }, `relevo · paso ${state.step}`);
+    return this.relayView(state, mine);
+  }
+
+  /**
+   * Arranca un contexto nuevo: la instancia siguiente no recibe el historial, solo el estado guardado más
+   * la ventana causal de `buildAgentContext`, que además trae episodios parecidos (`episodicSimilarity`).
+   */
+  async resume(agent: string, objective: string): Promise<ResumeView | undefined> {
+    const state = await this.db.loadTaskState(agent, `task-${agent}`);
+    if (!state) return undefined;
+    const ctx = (await this.db.buildAgentContext({
+      taskId: `task-${agent}`,
+      currentPhase: "execute",
+      currentObjective: objective,
+      maxTokens: 800,
+      strategy: {
+        causalAnchors: true,
+        episodicSimilarity: { vector: embed(objective), k: 4, filters: [{ field: "agent", value: agent }] },
+      },
+      agents: [agent],
+    })) as { items?: { type: string; text?: string }[]; similarEpisodes?: { taskId: string }[] };
+    // El motor devuelve solo el id del episodio; el texto lo guardamos nosotros. Se descarta el propio
+    // estado actual y, por si el binario es anterior al filtro, todo lo que no sea de este agente.
+    const own = `ep:${agent}:`;
+    const episodes = (ctx.similarEpisodes ?? [])
+      .filter((e) => e.taskId.startsWith(own) && e.taskId !== `${own}${state.step}`)
+      .map((e) => ({ id: e.taskId, text: this.episodes.get(e.taskId) ?? "" }))
+      .filter((e) => e.text);
+    const items = (ctx.items ?? [])
+      .filter((i) => i.type !== "episode" && i.text)
+      .map((i) => ({ type: i.type, text: i.text! }));
+    const mine = [...this.docs.values()].filter((d) => d.agent === agent);
+    return { ...this.relayView(state, mine), items, episodes };
+  }
+
+  private episodes = new Map<string, string>();
+
+  private relayView(state: StoredTaskState, mine: DocRec[]): RelayView {
+    const rendered = renderTaskState(state);
+    return { state, rendered, fullChars: mine.reduce((n, d) => n + d.text.length, 0), relayChars: rendered.length };
   }
 
   emitStats() {

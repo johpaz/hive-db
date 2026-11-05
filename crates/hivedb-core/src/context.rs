@@ -41,6 +41,18 @@ pub struct ContextStrategy {
 pub struct EpisodicConfig {
     pub vector: Vec<f32>,
     pub k: usize,
+    /// Filtros de igualdad que se suman a `kind=episode`. En una base compartida entre
+    /// inquilinos DEBE llevar al menos el del inquilino: sin él, la búsqueda recorre los
+    /// episodios de todos.
+    #[serde(default)]
+    pub filters: Vec<EpisodicFilter>,
+}
+
+/// Filtro de igualdad sobre un campo del índice.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EpisodicFilter {
+    pub field: String,
+    pub value: String,
 }
 
 /// Configuration for including recent anomalies.
@@ -475,9 +487,11 @@ fn collect_similar_episodes(
     current_objective: &str,
 ) -> HiveResult<Vec<Episode>> {
     let use_text = !current_objective.is_empty();
+    let mut filters = vec![ScalarFilter::eq("kind", "episode")];
+    filters.extend(config.filters.iter().map(|f| ScalarFilter::eq(&f.field, &f.value)));
     let mut query = HybridQuery::default()
         .with_vector(config.vector.clone())
-        .with_filters(vec![ScalarFilter::eq("kind", "episode")])
+        .with_filters(filters)
         .with_k(config.k);
     if use_text {
         query = query.with_text(current_objective.to_string());
