@@ -5,6 +5,8 @@ la API puede cambiar entre versiones menores.
 
 ## Sin publicar
 
+## 0.7.3 — 2026-11-06
+
 ### Añadido
 - **`strategy.timeline`** en `buildAgentContext` (inspirado en FlexA-Mem, arXiv 2610.33274): modo «línea de
   tiempo + detalle». Reserva `timelineShare` (0,35 por defecto; líneas de 80 caracteres) del presupuesto para una línea por decisión y

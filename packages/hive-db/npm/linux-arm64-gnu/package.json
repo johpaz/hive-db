@@ -1,6 +1,6 @@
 {
   "name": "@johpaz/hive-db-linux-arm64-gnu",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "cpu": [
     "arm64"
   ],

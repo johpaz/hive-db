@@ -1,6 +1,6 @@
 {
   "name": "@johpaz/hive-db-darwin-x64",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "cpu": [
     "x64"
   ],
