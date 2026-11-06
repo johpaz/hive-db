@@ -269,6 +269,21 @@ export interface ContextStrategy {
   compressCompletedPhases?: boolean;
   episodicSimilarity?: EpisodicConfig;
   recentAnomalies?: AnomalyConfig;
+  /**
+   * Modo «línea de tiempo + detalle»: reserva `timelineShare` del presupuesto para una línea por
+   * evento y rellena el resto con el texto original de lo más relevante al objetivo. Sin LLM.
+   * Omitido = comportamiento anterior. Requiere el binario nativo recompilado.
+   */
+  timeline?: TimelineConfig;
+}
+
+export interface TimelineConfig {
+  /** Fracción del presupuesto para la línea de tiempo (0–1). Por defecto 0.35. */
+  timelineShare?: number;
+  /** Rellenar con el texto original relevante. Por defecto true. */
+  detail?: boolean;
+  /** Tope de caracteres por línea. Por defecto 80. */
+  maxLineChars?: number;
 }
 
 export interface EpisodicConfig {

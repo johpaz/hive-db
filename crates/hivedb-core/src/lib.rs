@@ -35,7 +35,7 @@ pub use state::{
 pub use causal::{Anomaly, AnomalyKind, CausalThread, DecisionNode, ToolCallNode};
 pub use context::{
     AgentContext, AgentContextRequest, AnomalyConfig, ContextItem, ContextStrategy, Episode,
-    EpisodicConfig, EpisodicFilter, PhaseSummary,
+    EpisodicConfig, EpisodicFilter, PhaseSummary, TimelineConfig,
 };
 pub use harness::{
     Finding, FindingKind, HarnessEvaluation, HarnessInput, HarnessLoop, LearningProposal, RootCause,

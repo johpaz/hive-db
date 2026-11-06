@@ -33,6 +33,32 @@ pub struct ContextStrategy {
     pub compress_completed_phases: bool,
     pub episodic_similarity: Option<EpisodicConfig>,
     pub recent_anomalies: Option<AnomalyConfig>,
+    /// Modo "línea de tiempo + detalle": reserva parte del presupuesto para una
+    /// línea por evento y rellena el resto con texto original relevante.
+    /// `None` = comportamiento histórico.
+    pub timeline: Option<TimelineConfig>,
+}
+
+/// Configuración del modo línea de tiempo + detalle.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TimelineConfig {
+    /// Fracción del presupuesto reservada a la línea de tiempo (0.0–1.0).
+    pub timeline_share: f32,
+    /// Si se rellena el resto con el texto original de los eventos relevantes.
+    pub detail: bool,
+    /// Tope de caracteres por línea de la línea de tiempo.
+    pub max_line_chars: usize,
+}
+
+impl Default for TimelineConfig {
+    fn default() -> Self {
+        Self {
+            timeline_share: 0.35,
+            detail: true,
+            max_line_chars: 80,
+        }
+    }
 }
 
 /// Configuration for retrieving similar past episodes.
@@ -92,6 +118,12 @@ pub enum ContextItem {
         text: String,
         key_decisions: Vec<u64>,
     },
+    /// Una línea compacta por evento del hilo (modo `timeline`).
+    TimelineEntry {
+        seq: u64,
+        phase: Option<String>,
+        line: String,
+    },
 }
 
 impl ContextItem {
@@ -103,13 +135,16 @@ impl ContextItem {
             ContextItem::Anomaly { text } => text.len() + 10,
             ContextItem::Episode { summary, .. } => summary.len() + 20,
             ContextItem::PhaseSummary { text, .. } => text.len() + 10,
+            ContextItem::TimelineEntry { line, .. } => line.len() + 10,
         };
         (chars / 4).max(1)
     }
 
     pub fn seq(&self) -> Option<u64> {
         match self {
-            ContextItem::Decision { seq, .. } | ContextItem::ToolCall { seq, .. } => Some(*seq),
+            ContextItem::Decision { seq, .. }
+            | ContextItem::ToolCall { seq, .. }
+            | ContextItem::TimelineEntry { seq, .. } => Some(*seq),
             _ => None,
         }
     }
@@ -245,6 +280,10 @@ impl HiveDB {
         } else {
             self.causal_thread_for_agents(stream_id.clone(), &req.agents)?
         };
+
+        if let Some(cfg) = &req.strategy.timeline {
+            return Ok(build_timeline_context(&thread, &req, cfg));
+        }
 
         let mut items: Vec<ContextItem> = Vec::new();
         let mut included_seqs: HashSet<u64> = HashSet::new();
@@ -525,4 +564,170 @@ fn collect_similar_episodes(
         });
     }
     Ok(episodes)
+}
+
+/// Trunca a `max` caracteres (no bytes) añadiendo "…".
+fn truncate_chars(text: &str, max: usize) -> String {
+    let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max {
+        return one_line;
+    }
+    let cut: String = one_line.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
+}
+
+fn tokenize(text: &str) -> HashSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() > 2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Modo línea de tiempo + detalle: anomalías, una línea por evento dentro de su
+/// cuota y, con lo que sobre, el texto original de los eventos más relevantes
+/// para el objetivo. Determinista y sin LLM. Un item que no cabe se salta (no
+/// corta el resto).
+fn build_timeline_context(
+    thread: &CausalThread,
+    req: &AgentContextRequest,
+    cfg: &TimelineConfig,
+) -> AgentContext {
+    let mut selected: Vec<ContextItem> = Vec::new();
+    let mut tokens = 0usize;
+    let budget = req.max_tokens;
+
+    // 1. Anomalías: siempre primero.
+    for item in collect_anomalies_from_thread(thread) {
+        let cost = item.estimated_tokens();
+        if tokens + cost <= budget {
+            tokens += cost;
+            selected.push(item);
+        }
+    }
+    let anomalies: Vec<ContextItem> = selected.clone();
+
+    // 2. Línea de tiempo, ordenada por seq.
+    let mut entries: Vec<ContextItem> = Vec::new();
+    for d in &thread.decisions {
+        entries.push(ContextItem::TimelineEntry {
+            seq: d.seq,
+            phase: d.phase.clone(),
+            line: truncate_chars(&d.description, cfg.max_line_chars),
+        });
+    }
+    for t in &thread.tool_calls {
+        let line = match &t.outcome {
+            crate::ToolOutcome::Ok => format!("tool {} -> ok", t.tool),
+            crate::ToolOutcome::Err(e) => format!("tool {} -> error: {e}", t.tool),
+            crate::ToolOutcome::Timeout => format!("tool {} -> timeout", t.tool),
+        };
+        entries.push(ContextItem::TimelineEntry {
+            seq: t.seq,
+            phase: None,
+            line: truncate_chars(&line, cfg.max_line_chars),
+        });
+    }
+    entries.sort_by_key(|i| i.seq());
+
+    let share = cfg.timeline_share.clamp(0.0, 1.0);
+    let timeline_budget = tokens + ((budget.saturating_sub(tokens)) as f32 * share) as usize;
+    let total_cost: usize = entries.iter().map(|e| e.estimated_tokens()).sum();
+    let mut kept: Vec<ContextItem> = Vec::new();
+    if tokens + total_cost <= timeline_budget {
+        kept = entries;
+    } else if !entries.is_empty() {
+        // No cabe: conserva primero y último, y reparte el resto con paso fijo.
+        let n = entries.len();
+        let mut order: Vec<usize> = vec![0, n - 1];
+        let step = (n / 8).max(1);
+        order.extend((step..n - 1).step_by(step));
+        order.extend(1..n - 1);
+        let mut seen = HashSet::new();
+        let mut used = tokens;
+        let mut picked: Vec<usize> = Vec::new();
+        for i in order {
+            if !seen.insert(i) {
+                continue;
+            }
+            let cost = entries[i].estimated_tokens();
+            if used + cost <= timeline_budget {
+                used += cost;
+                picked.push(i);
+            }
+        }
+        picked.sort_unstable();
+        kept = picked.into_iter().map(|i| entries[i].clone()).collect();
+    }
+    let timeline_seqs: HashSet<u64> = kept.iter().filter_map(|i| i.seq()).collect();
+    for item in kept {
+        tokens += item.estimated_tokens();
+        selected.push(item);
+    }
+
+    // 3. Detalle: texto original de lo más relevante al objetivo, saltando lo que no cabe.
+    if cfg.detail {
+        let objective = tokenize(&req.current_objective);
+        let mut scored: Vec<(usize, u64, ContextItem)> = Vec::new();
+        for d in &thread.decisions {
+            let overlap = tokenize(&d.description).intersection(&objective).count();
+            if overlap > 0 {
+                scored.push((
+                    overlap,
+                    d.seq,
+                    ContextItem::Decision {
+                        seq: d.seq,
+                        phase: d.phase.clone(),
+                        text: d.description.clone(),
+                    },
+                ));
+            }
+        }
+        // Mayor solapamiento primero; a igualdad, el más reciente.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        let mut detail: Vec<ContextItem> = Vec::new();
+        for (_, seq, item) in scored {
+            // Si la línea ya contiene el texto completo, el detalle no aporta.
+            if let (true, ContextItem::Decision { text, .. }) =
+                (timeline_seqs.contains(&seq), &item)
+                && text.chars().count() <= cfg.max_line_chars
+            {
+                continue;
+            }
+            let cost = item.estimated_tokens();
+            if tokens + cost <= budget {
+                tokens += cost;
+                detail.push(item);
+            }
+        }
+        detail.sort_by_key(|i| i.seq());
+        selected.extend(detail);
+    }
+
+    AgentContext {
+        items: selected,
+        similar_episodes: Vec::new(),
+        anomalies,
+    }
+}
+
+fn collect_anomalies_from_thread(thread: &CausalThread) -> Vec<ContextItem> {
+    thread
+        .anomalies
+        .iter()
+        .map(|a| ContextItem::Anomaly {
+            text: match a.kind {
+                crate::causal::AnomalyKind::ErrorLoop => {
+                    format!(
+                        "Error loop: tool {:?} failed {} times",
+                        a.tool, a.repetitions
+                    )
+                }
+                crate::causal::AnomalyKind::ObjectiveDrift => format!(
+                    "Objective drift: {} decisions diverged from intent",
+                    a.repetitions
+                ),
+            },
+        })
+        .collect()
 }

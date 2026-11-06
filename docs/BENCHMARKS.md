@@ -184,6 +184,58 @@ y la híbrida llegaba a p99 9,5 ms. Dos cambios en el análisis y la fusión (ve
 - **Fusión con más candidatos que `k`** y **desempate determinista**: antes, con `k` pequeño, dos documentos
   con la misma puntuación RRF salían en orden aleatorio.
 
+## Contexto causal: línea de tiempo + detalle
+
+Mide `buildAgentContext` con `strategy.timeline` frente al modo anterior (`causalAnchors` +
+`compressCompletedPhases`). La idea viene de FlexA-Mem (arXiv 2610.33274): una línea de tiempo compacta más
+el texto original de lo relevante, sin LLM. **No reproduce el paper ni usa sus conjuntos de datos.**
+
+- **Datos sintéticos y deterministas.** Un hilo de 200 eventos en 4 fases; 20 llevan una «cadena exacta»
+  (ticket, ruta, número de pedido) detrás de más de 170 caracteres de relleno, de modo que una línea de 160
+  caracteres no la contiene y solo el detalle puede devolverla. Cada celda promedia 20 consultas.
+- **Escenario A:** la consulta es la propia cadena. **Escenario B:** una frase natural que la contiene (el
+  modo anterior ancla por coincidencia de subcadena del objetivo, así que en B no puede anclar).
+- «Pasos con línea» es el porcentaje de los 200 eventos que aparecen en el contexto (por `seq`).
+- Una sola máquina y una sola ejecución; los tiempos son indicativos. Salida cruda en
+  [`docs/benchmarks/real/timeline-context.txt`](benchmarks/real/timeline-context.txt).
+
+Reproducir: `cargo run --release -p hivedb-core --example bench_timeline_context`.
+
+| Presupuesto | Modo | A: cadena exacta | B: cadena exacta | Pasos con línea | µs/llamada |
+|---:|---|---:|---:|---:|---:|
+| 500 | anterior | 100 % | 0 % | 3–4 % | ~330–470 |
+| 500 | timeline (80, por defecto) | 100 % | 100 % | 5 % | ~870 |
+| 2 000 | anterior | 100 % | 15 % | 15 % | ~330–480 |
+| 2 000 | timeline (80, por defecto) | 100 % | 100 % | 17 % | ~860 |
+| 2 000 | timeline, líneas de 160 | 100 % | 100 % | 10 % | ~900 |
+| 2 000 | timeline, líneas de 60 | 100 % | 100 % | 21 % | ~860 |
+| 4 000 | anterior | 100 % | 25 % | 26–27 % | ~330–470 |
+| 4 000 | timeline (80, por defecto) | 100 % | 100 % | 32 % | ~870 |
+| 4 000 | timeline, líneas de 160 | 100 % | 100 % | 18 % | ~890 |
+| 4 000 | timeline, líneas de 60 | 100 % | 100 % | 40 % | ~860 |
+
+**Qué dice**
+- Cuando la consulta no coincide literalmente con un evento (B), el modo anterior recupera la cadena exacta
+  en 0–25 % de los casos según el presupuesto; `timeline` la recupera siempre, también con 500 tokens, y usa
+  menos tokens (no rellena el presupuesto con lo que no es relevante).
+- La cobertura de pasos depende de `maxLineChars`. Con el primer valor probado (160) la línea de tiempo cubría
+  *menos* pasos que el modo anterior (18 % frente a 26 % con 4 000 tokens), porque en este corpus las líneas no
+  comprimían nada. Por eso el valor por defecto pasó a **80**: con él `timeline` cubre más desde 1 000 tokens
+  (10 % frente a 7 %; 32 % frente a 26 % con 4 000) y empata con 500. El 80 se eligió mirando estas mismas
+  medidas, sobre un corpus cuyas decisiones miden ~170 caracteres: con decisiones más cortas o más largas el
+  mejor valor será otro, y conviene fijarlo según la longitud típica de las del consumidor.
+- Cuesta unas 2,5 veces más tiempo por llamada (~0,9 ms frente a ~0,35 ms): es irrelevante frente a una
+  llamada a un modelo, pero no es gratis.
+
+**Qué no dice**
+- No mide si el agente responde mejor: solo si la cadena está en el contexto. Es un indicador de
+  recuperación, no de calidad de extremo a extremo.
+- La relevancia del detalle es solapamiento de palabras con el objetivo; una consulta sin palabras en común
+  con el evento (un sinónimo) no lo recupera. En A el modo anterior parte con ventaja (la consulta es la
+  cadena misma); es un caso poco realista.
+- Un solo hilo sintético de 200 eventos. No se ha probado con hilos de miles de eventos ni con LongMemEval,
+  LoCoMo o AppWorld.
+
 ## Competidores no medidos
 
 Mem0, Zep/Graphiti y Letta son capas o servicios de memoria para agentes que dependen de un LLM y de

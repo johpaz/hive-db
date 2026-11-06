@@ -122,6 +122,7 @@ fn long_running_task_resumes_with_full_causal_context() {
                 compress_completed_phases: true,
                 episodic_similarity: None,
                 recent_anomalies: None,
+                ..Default::default()
             },
         })
         .unwrap();

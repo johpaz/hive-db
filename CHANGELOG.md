@@ -5,6 +5,14 @@ la API puede cambiar entre versiones menores.
 
 ## Sin publicar
 
+### Añadido
+- **`strategy.timeline`** en `buildAgentContext` (inspirado en FlexA-Mem, arXiv 2610.33274): modo «línea de
+  tiempo + detalle». Reserva `timelineShare` (0,35 por defecto; líneas de 80 caracteres) del presupuesto para una línea por decisión y
+  tool call (`timelineEntry`), y rellena el resto con el texto original de las decisiones más relevantes al
+  objetivo, saltando las que no caben en vez de cortar. Determinista, sin LLM. Omitido, el resultado es el de
+  siempre. Rust: `ContextStrategy` gana el campo `timeline` (quien la construya sin `..Default::default()`
+  debe añadirlo). Requiere recompilar el binario nativo.
+
 ## 0.7.2 — 2026-11-05
 
 ## 0.7.1 — 2026-11-05
